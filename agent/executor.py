@@ -6,7 +6,10 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from policy import Decision, PolicyEngine
+try:
+    from policy import Decision, PolicyEngine
+except ImportError:  # pragma: no cover
+    from agent.policy import Decision, PolicyEngine
 
 try:
     from confirm import ConfirmManager

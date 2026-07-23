@@ -30,7 +30,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from llm_client import OpenAICompatibleClient
+try:
+    from llm_client import OpenAICompatibleClient
+except ImportError:  # pragma: no cover
+    from agent.llm_client import OpenAICompatibleClient
 
 log = logging.getLogger("harness.llm_router")
 

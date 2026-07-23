@@ -9,12 +9,22 @@ import sys
 import time
 from pathlib import Path
 
-from config import load_config
-from poller import GithubPoller
-from executor import Executor
-from reporter import Reporter
-from policy import PolicyEngine
-from confirm import ConfirmManager
+try:
+    from config import load_config
+    from poller import GithubPoller
+    from executor import Executor
+    from reporter import Reporter
+    from policy import PolicyEngine
+except ImportError:  # pragma: no cover
+    from agent.config import load_config
+    from agent.poller import GithubPoller
+    from agent.executor import Executor
+    from agent.reporter import Reporter
+    from agent.policy import PolicyEngine
+try:
+    from confirm import ConfirmManager
+except ImportError:  # pragma: no cover
+    from agent.confirm import ConfirmManager
 
 LOCK_PATH = Path.home() / ".iddo-harness" / "agent.lock"
 

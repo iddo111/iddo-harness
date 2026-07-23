@@ -16,10 +16,16 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from amp import (
-    AmpEnvelope,
-    build_envelope,
-)
+try:
+    from amp import (
+        AmpEnvelope,
+        build_envelope,
+    )
+except ImportError:  # pragma: no cover
+    from agent.amp import (
+        AmpEnvelope,
+        build_envelope,
+    )
 
 # ---------------------------------------------------------------------------
 # Tool schemas (OpenAI `tools=[...]` format)

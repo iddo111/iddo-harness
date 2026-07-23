@@ -17,18 +17,30 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable
 
-from amp import AmpEnvelope, build_envelope, to_json
-
-from executor import Executor, Result
-from policy import Decision, PolicyEngine
-from llm_router import LlmRouter
-from llm_tools import (
-    ALL_TOOLS,
-    envelope_to_executor_task,
-    result_to_harness_result_envelope,
-    result_to_tool_message,
-    tool_call_to_task,
-)
+try:
+    from amp import AmpEnvelope, build_envelope, to_json
+    from executor import Executor, Result
+    from policy import Decision, PolicyEngine
+    from llm_router import LlmRouter
+    from llm_tools import (
+        ALL_TOOLS,
+        envelope_to_executor_task,
+        result_to_harness_result_envelope,
+        result_to_tool_message,
+        tool_call_to_task,
+    )
+except ImportError:  # pragma: no cover
+    from agent.amp import AmpEnvelope, build_envelope, to_json
+    from agent.executor import Executor, Result
+    from agent.policy import Decision, PolicyEngine
+    from agent.llm_router import LlmRouter
+    from agent.llm_tools import (
+        ALL_TOOLS,
+        envelope_to_executor_task,
+        result_to_harness_result_envelope,
+        result_to_tool_message,
+        tool_call_to_task,
+    )
 
 log = logging.getLogger("harness.llm_loop")
 
