@@ -1,0 +1,132 @@
+# Iddo Harness — Policy Configuration
+# עידו, זו המדיניות שמנחה את הסוכן. אתה יכול לערוך.
+
+version: 1
+owner: iddo111
+last_updated: 2026-07-23
+
+# ---------------------------------------------------------------------------
+# רמות אישור
+# ---------------------------------------------------------------------------
+
+# פעולות שרצות מיד ללא אישור
+auto_allow:
+  commands:
+    - "ls*"
+    - "dir*"
+    - "pwd"
+    - "cd*"
+    - "cat*"
+    - "type*"
+    - "head*"
+    - "tail*"
+    - "grep*"
+    - "find*"
+    - "which*"
+    - "where*"
+    - "git status"
+    - "git log*"
+    - "git diff*"
+    - "git branch*"
+    - "git remote*"
+    - "df -h"
+    - "free -h"
+    - "ps *"
+    - "systemctl status*"
+    - "docker ps*"
+    - "docker images*"
+    - "nvidia-smi*"
+    - "python* --version"
+    - "pip list*"
+    - "node --version"
+    - "npm list*"
+
+  paths:
+    read:
+      - "D:\\CLAUDE\\**"
+      - "D:\\shiri\\**"
+      - "C:\\Users\\%USERNAME%\\Documents\\**"
+      - "~/**"
+      - "/home/**"
+
+# פעולות שדורשות אישור push notification / SMS
+require_confirm:
+  commands:
+    - "pip install*"
+    - "npm install*"
+    - "apt install*"
+    - "docker run*"
+    - "docker rm*"
+    - "docker rmi*"
+    - "git push*"
+    - "git commit*"
+    - "git merge*"
+    - "git rebase*"
+    - "git reset --hard*"
+    - "systemctl start*"
+    - "systemctl stop*"
+    - "systemctl enable*"
+    - "systemctl disable*"
+
+  paths:
+    write:
+      - "D:\\CLAUDE\\**"
+      - "D:\\shiri\\**"
+      - "~/**"
+
+# פעולות אסורות בהחלט
+block:
+  commands:
+    - "rm -rf /"
+    - "rm -rf /*"
+    - "rm -rf ~"
+    - "rm -rf ~/*"
+    - "del /q C:\\**"
+    - "del /q /s C:\\**"
+    - "format*"
+    - "mkfs*"
+    - "dd if=* of=/dev/*"
+    - "shutdown*"
+    - "reboot*"
+    - "*password*"
+    - "*token*"
+    - "*secret*"
+    - "reg delete*"
+    - "regedit*"
+
+  paths:
+    absolute_no_touch:
+      - "C:\\Windows\\**"
+      - "C:\\Program Files\\**"
+      - "/etc/**"
+      - "/boot/**"
+      - "/System/**"
+      - "**/.ssh/id_*"
+      - "**/.aws/credentials"
+      - "**/.env"
+      - "**/.env.*"
+
+# ---------------------------------------------------------------------------
+# הגדרות תזמון
+# ---------------------------------------------------------------------------
+polling:
+  interval_seconds: 5
+  max_concurrent_tasks: 3
+  task_timeout_seconds: 600
+
+# ---------------------------------------------------------------------------
+# איפה נשמרים תוצרים
+# ---------------------------------------------------------------------------
+paths:
+  audit_log: "~/.iddo-harness/audit.log"
+  task_queue: "~/.iddo-harness/queue/"
+  results:   "~/.iddo-harness/results/"
+
+# ---------------------------------------------------------------------------
+# תעלת התקשורת
+# ---------------------------------------------------------------------------
+transport:
+  type: github
+  repo: iddo111/iddo-harness-bridge
+  task_dir: tasks/
+  result_dir: results/

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.iddo-harness/
+audit.log
+*.log
+.DS_Store
+Thumbs.db
