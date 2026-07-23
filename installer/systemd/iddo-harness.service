@@ -1,0 +1,52 @@
+# Iddo Harness — systemd unit
+#
+# Installed by installer/install_linux.sh to /etc/systemd/system/iddo-harness.service
+# Runs the agent as the dedicated, unprivileged `iddo-harness` system user.
+#
+# Manage with:
+#   sudo systemctl status iddo-harness
+#   sudo systemctl restart iddo-harness
+#   sudo systemctl stop iddo-harness
+#   journalctl -u iddo-harness -f
+
+[Unit]
+Description=Iddo Harness agent (Perplexity Computer bridge)
+Documentation=https://github.com/iddo111/iddo-harness
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=iddo-harness
+Group=iddo-harness
+WorkingDirectory=/opt/iddo-harness
+ExecStart=/opt/iddo-harness/.venv/bin/iddo-harness --config /etc/iddo-harness/policy.yaml run
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+KillMode=mixed
+
+# --- logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=iddo-harness
+
+# --- environment ---
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/opt/iddo-harness
+# agent/*.py uses flat, script-style imports (e.g. `from config import
+# load_config`) rather than `agent.config`, so the `agent/` directory itself
+# must be on sys.path in addition to the installed package - see
+# tests/conftest.py in the repo for the same requirement in the test suite.
+Environment=PYTHONPATH=/opt/iddo-harness/agent
+
+# --- light-touch hardening (kept permissive: the agent legitimately shells
+#     out to git/gh and touches paths across the filesystem per policy.yaml) ---
+NoNewPrivileges=true
+ProtectSystem=false
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target

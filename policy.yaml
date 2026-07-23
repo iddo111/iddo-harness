@@ -115,6 +115,12 @@ polling:
   task_timeout_seconds: 600
 
 # ---------------------------------------------------------------------------
+# אישורים ממתינים (confirm flow)
+# ---------------------------------------------------------------------------
+confirm:
+  timeout_minutes: 30
+
+# ---------------------------------------------------------------------------
 # איפה נשמרים תוצרים
 # ---------------------------------------------------------------------------
 paths:
@@ -130,3 +136,32 @@ transport:
   repo: iddo111/iddo-harness-bridge
   task_dir: tasks/
   result_dir: results/
+
+# ---------------------------------------------------------------------------
+# LLM backends — Eranim cluster (4x NVIDIA DGX Spark, two pairs) running
+# vLLM with an OpenAI-compatible /v1/chat/completions + /v1/models surface.
+#
+# Each role has a `primary` backend and an optional `secondary` fallback.
+# LlmRouter (agent/llm_router.py) health-checks every backend on
+# `health_check_interval` seconds via GET /v1/models, and routes to the
+# secondary automatically if the primary goes unhealthy.
+#
+#   Pair A (eran1+eran2): GLM-4.6 or Qwen3-Coder-480B via vLLM, port 8000.
+#   Pair B (eran3+eran4): reasoning model / fine-tune, also vLLM, port 8000.
+#
+# See docs/llm_integration.md for how to point these at vLLM/Ollama/etc.
+# ---------------------------------------------------------------------------
+llm_backends:
+  coder:
+    primary:
+      base_url: http://eran1.local:8000/v1
+      model: glm-4.6
+    secondary:
+      base_url: http://eran3.local:8000/v1
+      model: glm-4.6
+    health_check_interval: 60
+  reasoner:
+    primary:
+      base_url: http://eran3.local:8000/v1
+      model: deepseek-v3.1
+    health_check_interval: 60
