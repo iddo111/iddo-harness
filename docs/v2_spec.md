@@ -130,8 +130,11 @@ Send stdin to a live session and read whatever comes back within a window.
 window*, not a deadline for the command — the caller polls again with an empty
 `input` to read more.
 
-**Policy:** the *input line* is policy-checked as if it were a shell command, so
-`rm -rf /` typed into a live session is still blocked.
+**Policy:** the *input line* is checked against the **block** rules only.
+Opening the session already cleared its command through the full
+auto/confirm/block ladder, and that grant covers typing into it — otherwise
+every line of a `python -i` transcript would park a confirmation. Block
+patterns still apply, so `rm -rf /` typed into a live session is refused.
 
 ---
 

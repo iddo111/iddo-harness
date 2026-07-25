@@ -665,11 +665,20 @@ class ExecutorV2:
         return Result(task_id=task.id, ok=True, decision=decision, stdout=session.session_id, metadata=meta)
 
     def _gate_session_write(self, task: Any) -> Result:
-        # The typed line is policy-checked as if it were a shell command, so a
-        # blocked command cannot sneak in through a live REPL.
-        line = task.payload.get("input", "")
-        decision, _reason, early = self._gate(task, line.strip(), task.payload.get("paths", []))
-        return early if early is not None else self._exec_session_write(task, decision.value)
+        """Gate a session write against the *block* rules only.
+
+        Opening the session already cleared its command through the full
+        auto/confirm/block ladder, and that grant covers typing into it —
+        otherwise every line of a `python -i` transcript would park a
+        confirmation. Block patterns still apply, so `rm -rf /` cannot sneak
+        in through a live REPL.
+        """
+        line = task.payload.get("input", "").strip()
+        decision, reason = self.policy.decide(line, task.payload.get("paths", []))
+        self.policy.audit(task.id, f"session_write {line!r}", decision, reason)
+        if decision is Decision.BLOCK:
+            return Result(task_id=task.id, ok=False, decision="block", error=reason)
+        return self._exec_session_write(task, "auto")
 
     def _exec_session_write(self, task: Any, decision: str = "auto") -> Result:
         """Write stdin into a live session and drain whatever it emits."""
