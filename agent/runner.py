@@ -242,16 +242,19 @@ class TaskRunner:
         attempt = 0
 
         while attempt < retry.max_attempts:
-            attempt += 1
-            if attempt > 1:
-                delay = retry.delay_before(attempt)
+            if attempt:
+                # Backoff happens before the counter moves, so a cancellation
+                # landing mid-sleep leaves `attempts` at the number of attempts
+                # that actually reached the executor.
+                delay = retry.delay_before(attempt + 1)
                 if delay:
                     self.sleep(delay)
                 if self.is_cancelled(task_id):
                     break
                 if self.metrics is not None:
                     self.metrics.retry_attempted(task_id)
-                log.info(f"task {task_id}: retry {attempt}/{retry.max_attempts}")
+                log.info(f"task {task_id}: retry {attempt + 1}/{retry.max_attempts}")
+            attempt += 1
 
             if self.metrics is not None:
                 self.metrics.task_started(task_id, getattr(task, "kind", "unknown"))

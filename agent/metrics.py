@@ -26,6 +26,12 @@ LATENCY_WINDOW = 1024
 
 LATENCY_FAMILIES = ("poll_to_start", "start_to_complete")
 
+#: Counters that snapshot() reports under a name of its own choosing. Anything
+#: else recorded through incr() is passed through under its raw name.
+NAMED_COUNTERS = frozenset(
+    {"tasks_total", "shell_bytes_streamed", "chunks_pushed", "retries_total"}
+)
+
 
 def percentile(samples: Iterable[float], fraction: float) -> float:
     """Nearest-rank percentile. Returns 0.0 for an empty sample set."""
@@ -173,6 +179,11 @@ class Metrics:
             "chunks_pushed": counters.get("chunks_pushed", 0),
             "retries_total": counters.get("retries_total", 0),
         }
+        # Counters registered ad hoc through incr() — ws_connections and
+        # friends — would otherwise be collected and never reported.
+        for name, value in counters.items():
+            if name not in NAMED_COUNTERS:
+                doc[name] = value
         for name in ("queue_depth", "active_sessions", "active_watches", "active_tasks"):
             doc[name] = gauges.get(name, 0)
         for name, value in gauges.items():
