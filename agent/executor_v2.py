@@ -381,6 +381,12 @@ class ExecutorV2:
         self.sessions: dict[str, ShellSession] = {}
         self.watches: dict[str, FileWatch] = {}
         self._seq: dict[str, int] = {}
+        # v3 cancellation: task_id -> the live handle (Popen / ShellSession /
+        # FileWatch) that stop() has to take down. Guarded by its own lock
+        # because stop() is called from a different thread than run().
+        self._running: dict[str, Any] = {}
+        self._cancelled: set[str] = set()
+        self._running_lock = threading.RLock()
 
     # -----------------------------------------------------------------------
     # Dispatch
@@ -388,6 +394,88 @@ class ExecutorV2:
     def handles(self, kind: str) -> bool:
         """True when ``kind`` is one of the v2 Agent Fabric kinds."""
         return kind in V2_KINDS
+
+    # -----------------------------------------------------------------------
+    # Cancellation (v3)
+    # -----------------------------------------------------------------------
+    def _register_running(self, task_id: str, handle: Any) -> None:
+        with self._running_lock:
+            self._running[task_id] = handle
+
+    def _forget_handle(self, handle: Any) -> None:
+        """Drop every ``_running`` entry pointing at ``handle``.
+
+        Used when a session or watch is torn down through its own kind
+        (``shell_session_close`` / ``watch_stop``) or reaped for idleness, so
+        the cancel table does not accumulate dead handles.
+        """
+        with self._running_lock:
+            for task_id in [k for k, v in self._running.items() if v is handle]:
+                del self._running[task_id]
+
+    def _unregister_running(self, task_id: str) -> None:
+        with self._running_lock:
+            self._running.pop(task_id, None)
+
+    def cancel_requested(self, task_id: str) -> bool:
+        """True once :meth:`stop` has been called for ``task_id``."""
+        with self._running_lock:
+            return task_id in self._cancelled
+
+    def clear_cancel(self, task_id: str) -> None:
+        """Forget a cancellation flag once the task has finished reacting."""
+        with self._running_lock:
+            self._cancelled.discard(task_id)
+
+    def running_task_ids(self) -> list[str]:
+        with self._running_lock:
+            return sorted(self._running)
+
+    def stop(self, task_id: str, *, grace_sec: float = 3.0) -> bool:
+        """Ask a running task to stop, SIGTERM first then SIGKILL.
+
+        Returns True when a live handle was found and signalled. The task's own
+        thread notices the flag, flushes a final chunk with ``cancelled: true``
+        and returns — this method does not synthesise the result itself, so
+        there is exactly one final chunk per task either way.
+        """
+        with self._running_lock:
+            self._cancelled.add(task_id)
+            handle = self._running.get(task_id)
+
+        if handle is None:
+            return False
+
+        if isinstance(handle, ShellSession):
+            try:
+                handle.close()
+            except Exception:  # pragma: no cover - best effort teardown
+                log.exception(f"cancel: closing session for task={task_id} failed")
+            return True
+
+        if isinstance(handle, FileWatch):
+            try:
+                handle.stop()
+            except Exception:  # pragma: no cover
+                log.exception(f"cancel: stopping watch for task={task_id} failed")
+            return True
+
+        terminate = getattr(handle, "terminate", None)
+        if terminate is None:
+            return False
+        try:
+            terminate()
+            wait = getattr(handle, "wait", None)
+            if wait is not None:
+                try:
+                    wait(timeout=grace_sec)
+                except Exception:
+                    kill = getattr(handle, "kill", None)
+                    if kill is not None:
+                        kill()
+        except Exception:  # pragma: no cover
+            log.exception(f"cancel: terminating task={task_id} failed")
+        return True
 
     def run(self, task: Any) -> Result:
         """Policy-gate and execute ``task``, returning a v1-shaped Result."""
@@ -518,6 +606,8 @@ class ExecutorV2:
             body = self._emit(task, {"ok": False, "decision": decision, "error": str(e)}, is_final=True)
             return Result(task_id=task.id, ok=False, decision=decision, error=str(e), metadata={"final_chunk": body})
 
+        self._register_running(task.id, proc)
+
         q: queue.Queue[tuple[str, str] | None] = queue.Queue()
         readers = [
             threading.Thread(target=_pump_lines, args=(proc.stdout, "stdout", q), daemon=True),
@@ -535,6 +625,7 @@ class ExecutorV2:
         deadline = time.time() + timeout
         last_flush = time.time()
         timed_out = False
+        cancelled = False
 
         def flush(stream: str, force: bool = False) -> None:
             nonlocal chunks
@@ -550,6 +641,9 @@ class ExecutorV2:
             chunks += 1
 
         while open_readers > 0:
+            if self.cancel_requested(task.id):
+                cancelled = True
+                break
             remaining = deadline - time.time()
             if remaining <= 0:
                 timed_out = True
@@ -573,12 +667,21 @@ class ExecutorV2:
         for stream in ("stdout", "stderr"):
             flush(stream, force=True)
 
-        if timed_out:
+        # stop() may have terminated the process while we were mid-read, in
+        # which case the readers hit EOF and the loop exited normally — so the
+        # flag has to be re-checked here, not only at the top of the loop.
+        cancelled = cancelled or self.cancel_requested(task.id)
+
+        if timed_out or cancelled:
             try:
                 proc.kill()
             except Exception:  # pragma: no cover
                 pass
             exit_code: int | None = None
+            try:
+                exit_code = proc.wait(timeout=2)
+            except Exception:  # pragma: no cover
+                exit_code = None
         else:
             try:
                 exit_code = proc.wait(timeout=5)
@@ -586,26 +689,39 @@ class ExecutorV2:
                 proc.kill()
                 exit_code = None
 
-        ok = (not timed_out) and exit_code == 0
-        final = {
+        self._unregister_running(task.id)
+        if cancelled:
+            self.clear_cancel(task.id)
+
+        ok = (not timed_out) and (not cancelled) and exit_code == 0
+        final: dict[str, Any] = {
             "ok": ok,
             "decision": decision,
             "exit_code": exit_code,
             "stats": {"chunks": chunks, "stdout_bytes": totals["stdout"], "stderr_bytes": totals["stderr"]},
         }
-        if timed_out:
+        if cancelled:
+            final["cancelled"] = True
+            final["error"] = "cancelled"
+        elif timed_out:
             final["error"] = "timeout"
         body = self._emit(task, final, is_final=True)
 
+        error = "cancelled" if cancelled else ("timeout" if timed_out else "")
         return Result(
             task_id=task.id,
             ok=ok,
-            decision=decision,
+            decision="cancelled" if cancelled else decision,
             stdout="".join(collected)[-200_000:],
             stderr="".join(collected_err)[-16_000:],
             exit_code=exit_code,
-            error="timeout" if timed_out else "",
-            metadata={"streamed": True, "chunks": chunks, "final_chunk": body},
+            error=error,
+            metadata={
+                "streamed": True,
+                "chunks": chunks,
+                "cancelled": cancelled,
+                "final_chunk": body,
+            },
         )
 
     # -----------------------------------------------------------------------
@@ -623,6 +739,7 @@ class ExecutorV2:
                 self.sessions[sid].close()
             except Exception:  # pragma: no cover
                 pass
+            self._forget_handle(self.sessions[sid])
             del self.sessions[sid]
             log.info(f"session {sid} reaped")
         return dead
@@ -660,6 +777,10 @@ class ExecutorV2:
         )
         session.start_readers()
         self.sessions[session.session_id] = session
+        # A session outlives the task that opened it, so keep the handle under
+        # that task id: cancelling the opening task is how a consumer kills a
+        # REPL it no longer wants without knowing the session id.
+        self._register_running(task.id, session)
         meta = {"session_id": session.session_id, "pid": proc.pid, "command": command}
         log.info(f"session {session.session_id} opened pid={proc.pid}")
         return Result(task_id=task.id, ok=True, decision=decision, stdout=session.session_id, metadata=meta)
@@ -733,6 +854,7 @@ class ExecutorV2:
             return Result(task_id=task.id, ok=False, decision="auto", error=f"no such session: {sid}")
         stdout, stderr = session.drain()
         exit_code = session.close()
+        self._forget_handle(session)
         return Result(
             task_id=task.id, ok=True, decision="auto", stdout=stdout, stderr=stderr, exit_code=exit_code,
             metadata={"session_id": sid, "closed": True, "uptime_sec": round(time.time() - session.created_at, 3)},
