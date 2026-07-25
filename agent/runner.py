@@ -25,8 +25,10 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 try:  # Flat script-style imports, matching the rest of agent/.
+    from executor import Result
     from taskqueue import TaskQueue, parse_schedule
 except ImportError:  # pragma: no cover - package-style import
+    from agent.executor import Result  # type: ignore[no-redef]
     from agent.taskqueue import TaskQueue, parse_schedule  # type: ignore[no-redef]
 
 log = logging.getLogger("iddo-harness.runner")
@@ -96,6 +98,7 @@ class TaskRunner:
         self._lock = threading.RLock()
         self._workers: dict[str, threading.Thread] = {}
         self._cancelled: set[str] = set()
+        self._dequeued: dict[str, Any] = {}
         self._peak_concurrency = 0
         self._in_flight = 0
 
@@ -149,6 +152,10 @@ class TaskRunner:
 
         removed = self.queue.remove(target_id)
         if removed is not None and not was_running:
+            # Keep the real task: its AMP envelope is what routes the synthetic
+            # cancelled result back to whoever queued it.
+            with self._lock:
+                self._dequeued[target_id] = removed
             return "queued"
 
         stop = getattr(self.executor, "stop", None)
@@ -171,8 +178,6 @@ class TaskRunner:
         and a target that never started gets a synthetic ``cancelled`` result
         so the producer is not left waiting for a chunk that will never come.
         """
-        from executor import Result  # local import: avoids a cycle at module load
-
         target = str((getattr(task, "payload", None) or {}).get("task_id") or "").strip()
         if not target:
             result = Result(
@@ -210,12 +215,15 @@ class TaskRunner:
             "error": "cancelled",
             "cancelled_by": str(getattr(cancel_task, "id", "")),
         }
+        with self._lock:
+            target = self._dequeued.pop(target_id, None)
+        if target is None:
+            target = _TargetStub(target_id)
         send_chunk = getattr(self.reporter, "send_chunk", None)
-        stub = _TargetStub(target_id)
         if send_chunk is not None:
-            send_chunk(stub, body, 0, True)
+            send_chunk(target, body, 0, True)
         else:  # pragma: no cover - v1 reporter fallback
-            self.reporter.send_error(stub, "cancelled")
+            self.reporter.send_error(target, "cancelled")
         if self.metrics is not None:
             self.metrics.task_completed(target_id, "cancelled")
 
@@ -402,6 +410,4 @@ class _TargetStub:
 
 
 def _error_result(task_id: str, message: str) -> Any:
-    from executor import Result
-
     return Result(task_id=task_id, ok=False, decision="error", error=message)

@@ -248,6 +248,104 @@ class Metrics:
                 samples.clear()
 
 
+DEFAULT_METRICS_PORT = 8478
+
+
+class MetricsServer:
+    """Stdlib HTTP server exposing ``/metrics`` and ``/health``.
+
+    Bound to loopback, and requests from any other address get 403 even if the
+    operator widens the bind — these endpoints describe what the machine is
+    doing, which is not something to hand out. Deliberately not part of the
+    WebSocket bridge: metrics should be readable whether or not the low-latency
+    transport is switched on.
+    """
+
+    def __init__(
+        self,
+        metrics: Metrics,
+        *,
+        host: str = "127.0.0.1",
+        port: int = DEFAULT_METRICS_PORT,
+        version: str = "3.0.0",
+    ) -> None:
+        self.metrics = metrics
+        self.host = host
+        self.port = port
+        self.version = version
+        self._httpd: object | None = None
+        self._thread: threading.Thread | None = None
+
+    @property
+    def bound_port(self) -> int:
+        """The real port, which differs from ``port`` when 0 was requested."""
+        return self._httpd.server_address[1] if self._httpd is not None else self.port  # type: ignore[attr-defined]
+
+    def start(self) -> None:
+        import json as _json
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.parse import parse_qs, urlparse
+
+        outer = self
+        started_at = time.time()
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, fmt: str, *args: object) -> None:
+                pass  # BaseHTTPRequestHandler logs to stderr by default.
+
+            def _reply(self, code: int, body: str, content_type: str) -> None:
+                raw = body.encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_GET(self) -> None:  # noqa: N802 - stdlib naming
+                if self.client_address[0] not in {"127.0.0.1", "::1"}:
+                    self._reply(403, '{"error":"localhost only"}', "application/json")
+                    return
+                parsed = urlparse(self.path)
+                route = parsed.path.rstrip("/") or "/"
+                if route == "/health":
+                    self._reply(
+                        200,
+                        _json.dumps({
+                            "status": "ok",
+                            "uptime": round(time.time() - started_at, 3),
+                            "version": outer.version,
+                        }),
+                        "application/json",
+                    )
+                    return
+                if route != "/metrics":
+                    self._reply(404, '{"error":"not found"}', "application/json")
+                    return
+                fmt = (parse_qs(parsed.query).get("format") or ["json"])[0]
+                if fmt in {"prom", "prometheus", "text"}:
+                    self._reply(200, outer.metrics.prometheus(), "text/plain; version=0.0.4")
+                else:
+                    self._reply(200, _json.dumps(outer.metrics.snapshot(), indent=2, sort_keys=True),
+                                "application/json")
+
+        httpd = ThreadingHTTPServer((self.host, self.port), Handler)
+        httpd.daemon_threads = True
+        self._httpd = httpd
+        self._thread = threading.Thread(target=httpd.serve_forever, name="metrics-http", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        httpd, self._httpd = self._httpd, None
+        if httpd is not None:
+            httpd.shutdown()  # type: ignore[attr-defined]
+            httpd.server_close()  # type: ignore[attr-defined]
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+
 #: Process-wide default collector. Modules instrument against this; the
 #: runner swaps in a configured instance at startup via :func:`set_metrics`.
 METRICS = Metrics()
