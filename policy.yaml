@@ -41,6 +41,24 @@ auto_allow:
     - "node --version"
     - "npm list*"
 
+    # --- v2 Agent Fabric (docs/v2_spec.md §5) --------------------------------
+    # קריאה בלבד — בטוח להריץ אוטומטית
+    - "grep *"
+    - "glob *"
+    - "read_chunk *"
+    - "process_list"
+    - "process_list *"
+    - "watch_poll*"
+    - "watch_stop*"
+    # HTTP רק ל-loopback. LAN נופל לברירת המחדל (confirm).
+    - "http_local GET http://127.0.0.1*"
+    - "http_local GET http://localhost*"
+    - "http_local GET http://[[]::1[]]*"
+    - "http_local HEAD http://127.0.0.1*"
+    - "http_local HEAD http://localhost*"
+    - "http_local POST http://127.0.0.1*"
+    - "http_local POST http://localhost*"
+
   paths:
     read:
       - "D:\\CLAUDE\\**"
@@ -67,6 +85,18 @@ require_confirm:
     - "systemctl stop*"
     - "systemctl enable*"
     - "systemctl disable*"
+
+    # --- v2 Agent Fabric (docs/v2_spec.md §5) --------------------------------
+    # patch_file זו כתיבה — תמיד אישור
+    - "patch *"
+    # process_kill יכול להפיל dev server או ריצת אימון — תמיד אישור
+    - "process_kill*"
+    # HTTP ל-LAN (מכונות אחרות ברשת) — אישור. חיצוני נחסם ב-executor עצמו.
+    - "http_local * http://192.168.*"
+    - "http_local * http://10.*"
+    - "http_local * http://172.1[6-9].*"
+    - "http_local * http://172.2[0-9].*"
+    - "http_local * http://172.3[01].*"
 
   paths:
     write:
