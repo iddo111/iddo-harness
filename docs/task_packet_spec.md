@@ -351,3 +351,72 @@ loopback → `auto`; LAN → `confirm`.
 
 כשה-task הנכנס היה עטוף ב-AMP envelope, כל צ'אנק הוא envelope מלא של
 `harness_result` עם ה-body למעלה תחת `payload.body` — בדיוק כמו ב-v1.
+
+---
+
+## v3 — מטא-דאטה של תזמון
+
+ארבעה שדות אופציונליים ב-`payload` (או מקובצים תחת `payload.schedule`) קובעים
+*מתי* ו*באיזה סדר* משימה תרוץ. packet שלא נושא אף אחד מהם מתנהג בדיוק כמו ב-v2:
+FIFO בתוך הבנד `normal`.
+
+```json
+{
+  "id": "20260726-010-nightly-build",
+  "kind": "shell_stream",
+  "payload": {
+    "command": "npm run build",
+    "priority": "high",
+    "not_before": "2026-07-27T02:00:00Z",
+    "deadline": "2026-07-27T06:00:00Z",
+    "depends_on": ["20260726-009-npm-install"],
+    "retry": { "max_attempts": 3, "backoff_seconds": [1, 5, 15] }
+  }
+}
+```
+
+| שדה | ברירת מחדל | משמעות |
+|---|---|---|
+| `priority` | `normal` | `high` \| `normal` \| `low`. גבוה קודם, FIFO בתוך בנד. `urgent`/`critical`/`p0` → `high`, `background`/`batch`/`p3` → `low`. |
+| `not_before` | — | ISO-8601. המשימה לא נראית לסדרן עד המועד, אבל לא חוסמת אחרות. |
+| `deadline` | — | ISO-8601. עבר — המשימה נזרקת ומדווחת `status: "deadline_exceeded"`. `high` רץ בכל מקרה: מאוחר עדיף על never. |
+| `depends_on` | `[]` | רשימת task ids שחייבים להסתיים ב-`ok`. נבדק גם מול `results/` בדיסק, כך שתלות שהתקיימה במחזור polling קודם נחשבת. |
+| `retry` | `max_attempts: 1` | ניסיון חוזר על כשל. **verdict של policy לא נחשב flaky** — `block`/`confirm_required`/`cancelled` לא מנוסים שוב. |
+
+חותמת זמן נאיבית (בלי אזור זמן) נקראת כ-UTC, לא כשעה מקומית: המפיק הוא brick
+בענן וה-harness עשוי לשבת בכל אזור זמן. חותמת לא-פרסבילית נרשמת ל-log ומתעלמים
+ממנה — `deadline` שגוי לא תוקע את התור.
+
+`backoff_seconds` קצר מ-`max_attempts` חוזר על האיבר האחרון: `[1, 5]` עם 4
+ניסיונות ממתין 1s, 5s, 5s.
+
+### `results/{id}-attempt-{n}.json`
+
+כל ניסיון של משימה עם retry נכתב לקובץ נפרד. **הקבצים האלה אינם צ'אנקים** —
+הם יושבים מחוץ לזרם `seq`/`is_final`, כך שצרכן שעוקב אחרי חוזה הצ'אנקים לעולם
+לא רואה שני `is_final` למשימה אחת. הם דיאגנוסטיקה; התוצאה הקובעת היא הצ'אנק
+הסופי של הניסיון האחרון.
+
+### `cancel` — ביטול משימה
+
+```json
+{
+  "id": "20260726-011-stop-the-build",
+  "kind": "cancel",
+  "payload": { "task_id": "20260726-010-nightly-build" }
+}
+```
+
+`cancel` עוקף את התור — להעמיד ביטול בתור מאחורי העבודה שהוא עוצר היה מחטיא
+את הנקודה. שלוש התנהגויות, לפי מצב היעד:
+
+* **בתור** — נשלף מהתור ומקבל צ'אנק סופי סינתטי עם `cancelled: true`,
+  `status: "cancelled"` ו-`cancelled_by: <id של ה-cancel>`. המפיק לא נשאר
+  ממתין לתשובה שלא תבוא.
+* **רץ** — התהליך מקבל SIGTERM ואחריו SIGKILL. ה-executor מדווח בעצמו את
+  הצ'אנק הסופי שלו עם `cancelled: true`, ולכן ה-runner לא מסנתז שני.
+* **לא מוכר** — כישלון גלוי: `ok: false` עם ה-id בשדה `error`. ביטול שנעלם
+  בשקט הוא גרוע מביטול שנכשל.
+
+ה-`cancel` עצמו מחזיר `metadata.target_state` — `queued` \| `running` \|
+`unknown` — כך שהמפיק יודע מה בדיוק קרה.

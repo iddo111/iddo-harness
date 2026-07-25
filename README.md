@@ -4,6 +4,26 @@
 
 ---
 
+## v3 Track A — Realtime & Performance
+
+v2 נתן יכולות; Track A מטפל ב-latency ובמה שסביבו. המפרט המלא:
+[`docs/v3_track_a.md`](docs/v3_track_a.md).
+
+| יכולת | מה זה נותן |
+|---|---|
+| **WebSocket bridge** | `ws://127.0.0.1:8477/tasks` — צ'אנקים חוזרים בזמן אמת במקום להמתין ל-poll ול-push. מאומת ב-Bearer token, **כבוי כברירת מחדל**, ורץ *לצד* git bridge ולא במקומו |
+| **מקביליות** | `max_concurrent_tasks: 3` — build של עשר דקות לא חוסם יותר כל `read_file` מאחוריו. git נשאר writer יחיד דרך lock משותף |
+| **תור עדיפויות** | `priority`, `not_before`, `deadline`, `depends_on` — ה-producer קובע *מתי* ו*באיזה סדר* |
+| **ביטול** | `kind: cancel` — SIGTERM→SIGKILL, עם chunk סופי `cancelled: true` כדי שאף אחד לא ימתין לשווא |
+| **Retry** | `retry: {max_attempts, backoff_seconds}`, כל ניסיון ב-`results/<id>-attempt-<n>.json`. `block`/`confirm_required` לא חוזרים |
+| **Metrics** | `GET /metrics` (JSON או Prometheus) + `/health` — latency p50/p95/p99, מונים לפי kind ו-status, queue depth |
+| **`config.yaml`** | קובץ קונפיג ריצה אחד עם ולידציה ו-ENV override, במקום env vars מפוזרים |
+
+**Backward compat:** harness בלי `config.yaml`, בלי מטא-דאטת תזמון ובלי
+`ws.enabled` מתנהג בדיוק כמו v2. ב-`amp.py` לא נגענו.
+
+---
+
 ## v2 Highlights — Agent Fabric
 
 v2 מוסיף 11 יכולות חדשות (14 `kind`ים) מעל v1, בלי לשבור שום דבר קיים.
@@ -41,8 +61,11 @@ v2 מוסיף 11 יכולות חדשות (14 `kind`ים) מעל v1, בלי לש�
 | פרוטוקול | MCP | **AMP v1.0** — ניתוב רב-brick עם `reply.to_address` |
 | מספר לקוחות במקביל | server אחד ללקוח | הרבה producers לתוך `tasks/` אחד |
 
-איפה Desktop Commander עדיין מוביל: latency. stdio מקומי מגיב במילישניות, git poll לא.
-זה המחיר של לעבוד מכל מקום.
+איפה Desktop Commander הוביל: latency. stdio מקומי מגיב במילישניות, git poll לא —
+זה היה המחיר של לעבוד מכל מקום. **v3 Track A סוגר את הפער** עם תחבורת
+WebSocket אופציונלית לצד git bridge: כשהצרכן על אותה מכונה (או בקצה השני של
+tunnel קיים) הוא מקבל את הצ'אנקים בזמן אמת, ובלי לאבד את היכולת לעבוד מכל מקום
+כשהוא לא.
 
 **Backward compat:** כל task packet של v1 (`shell`, `read_file`, `write_file`,
 `list_dir`) ממשיך לרוץ בדיוק כמו קודם. `agent/executor.py` נשמר, ב-`agent/amp.py`
@@ -108,7 +131,12 @@ iddo-harness/
 │   ├── reporter.py          # מדווח תוצאות
 │   ├── reporter_v2.py       # דיווח בצ'אנקים (streaming)
 │   ├── policy.py            # אכיפת policy
-│   └── config.py            # הגדרות
+│   ├── config.py            # policy config (v1) + RuntimeConfig (v3)
+│   ├── runner.py            # thread pool, retries, ביטול (v3)
+│   ├── taskqueue.py         # עדיפויות, תלויות, חלונות זמן (v3)
+│   ├── metrics.py           # אוסף מדדים + /metrics ו-/health (v3)
+│   ├── ws_bridge.py         # תחבורת WebSocket מאומתת (v3)
+│   └── locks.py             # GIT_PUSH_LOCK המשותף (v3)
 ├── installer/               # התקנה מהירה
 │   ├── install_windows.ps1  # Windows one-liner
 │   ├── install_linux.sh     # Linux/DGX
@@ -116,7 +144,10 @@ iddo-harness/
 ├── docs/
 │   ├── quickstart.md
 │   ├── security.md
+│   ├── v2_spec.md
+│   ├── v3_track_a.md
 │   └── troubleshooting.md
+├── config.yaml              # קונפיג ריצה (v3)
 └── policy.yaml              # policy קונפיג
 ```
 
