@@ -49,7 +49,10 @@ streaming result protocol**, and a **live session model**.
 
 ---
 
-## 2. The 11 new kinds
+## 2. The 11 new capabilities (14 task kinds)
+
+Watching and process control each need more than one verb, so the 11
+capabilities below are exposed as 14 entries in `executor_v2.V2_KINDS`.
 
 ### 2.1 `shell_stream`
 
@@ -424,7 +427,7 @@ New patterns in `policy.yaml`:
 | `http_local GET http://127.0.0.1*`, `…localhost*` | `auto_allow` |
 | `patch <path>` | `require_confirm` |
 | `process_kill*` | `require_confirm` |
-| `watch_start <path>` | `require_confirm` (spawns a thread) → `auto` on read roots |
+| `watch_start <path>` | `auto` on read roots, otherwise default `confirm` |
 | `http_local * http://192.168.*` / `10.*` / `172.1[6-9].*` … | default `confirm` |
 
 `PolicyEngine.decide()` also gains **path-glob evaluation**, which v1 declared in

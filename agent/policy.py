@@ -3,11 +3,41 @@ Policy engine — decides whether a task can run, needs confirmation, or is bloc
 """
 import fnmatch
 import logging
+import os
 import re
 from enum import Enum
 from pathlib import Path
 
 log = logging.getLogger("harness.policy")
+
+# v2 kinds have no real command line, so the executors synthesise one
+# (`grep <path>`, `patch <path>`, `read_chunk <path>`, …). These verb lists let
+# decide() apply the path-glob rules that policy.yaml has always declared under
+# `auto_allow.paths.read` / `require_confirm.paths.write`. See docs/v2_spec.md §5.
+READ_VERBS = frozenset(
+    {"cat", "type", "head", "tail", "read", "read_chunk", "list", "ls", "dir", "grep", "glob", "watch_start", "watch_poll"}
+)
+WRITE_VERBS = frozenset({"write", "patch", "rm", "del", "mv", "move", "cp", "copy"})
+
+
+def _path_matches(path: str, pattern: str) -> bool:
+    """Glob-match a target path against a policy path pattern.
+
+    Beyond plain `fnmatch`, this normalises the three things that bite in a
+    mixed Windows/POSIX policy file: `~` and `%USERNAME%` are expanded,
+    separators are unified, and a trailing `/**` also matches the root itself
+    (so `D:\\CLAUDE\\**` covers `D:\\CLAUDE`). Matching is case-insensitive
+    because Windows paths in policy.yaml rarely match the casing the OS reports.
+    """
+    expanded = os.path.expandvars(os.path.expanduser(pattern))
+    norm_pat = expanded.replace("\\", "/").lower()
+    norm_path = os.path.expanduser(path).replace("\\", "/").rstrip("/").lower()
+
+    if fnmatch.fnmatchcase(norm_path, norm_pat):
+        return True
+    if norm_pat.endswith("/**") and norm_path == norm_pat[:-3]:
+        return True
+    return False
 
 
 class Decision(Enum):
@@ -24,9 +54,18 @@ class PolicyEngine:
     def decide(self, command: str, target_paths: list[str] | None = None) -> tuple[Decision, str]:
         """
         Returns (decision, reason).
-        Order of evaluation: block → require_confirm → auto_allow → default require_confirm.
+
+        Order of evaluation:
+        block commands → block paths → confirm commands → **confirm write paths**
+        → auto commands → **auto read paths** → default confirm.
+
+        The two path steps are v2 additions (docs/v2_spec.md §5). They are
+        additive: a v1 read verb already matched an `auto_allow.commands`
+        pattern before reaching the read-path step, and a v1 write verb already
+        fell through to the default CONFIRM, so no v1 decision changes.
         """
         cmd = command.strip()
+        verb = cmd.split(maxsplit=1)[0].lower() if cmd else ""
 
         # 1. blocked?
         for pat in self.cfg.block.get("commands", []):
@@ -43,10 +82,23 @@ class PolicyEngine:
             if fnmatch.fnmatchcase(cmd, pat):
                 return Decision.CONFIRM, f"requires confirmation: {pat}"
 
-        # 3. auto-allowed?
+        # 3. write verb touching a confirm-gated path?
+        if verb in WRITE_VERBS:
+            for path in target_paths or []:
+                for pat in self.cfg.require_confirm.get("paths", {}).get("write", []):
+                    if _path_matches(path, pat):
+                        return Decision.CONFIRM, f"write requires confirmation: {pat}"
+
+        # 4. auto-allowed?
         for pat in self.cfg.auto_allow.get("commands", []):
             if fnmatch.fnmatchcase(cmd, pat):
                 return Decision.AUTO, f"auto-allowed: {pat}"
+
+        # 5. read verb, and every target path sits inside an allowed read root?
+        read_roots = self.cfg.auto_allow.get("paths", {}).get("read", [])
+        if verb in READ_VERBS and target_paths and read_roots:
+            if all(any(_path_matches(p, pat) for pat in read_roots) for p in target_paths):
+                return Decision.AUTO, "auto-allowed: read path"
 
         # default — safety first
         return Decision.CONFIRM, "no matching rule (defaulting to confirmation)"

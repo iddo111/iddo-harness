@@ -32,13 +32,42 @@ class Result:
 
 
 class Executor:
-    def __init__(self, policy: PolicyEngine, confirm_manager: "ConfirmManager | None" = None):
+    def __init__(self, policy: PolicyEngine, confirm_manager: "ConfirmManager | None" = None, chunk_sink=None):
         self.policy = policy
         self.confirm_manager = confirm_manager or ConfirmManager(getattr(policy, "cfg", None))
+        self.chunk_sink = chunk_sink
+        self._v2 = None
+
+    # -----------------------------------------------------------------------
+    @property
+    def v2(self):
+        """Lazily-built ExecutorV2, cached so live shell sessions and watches
+        survive across polling cycles. Imported inside the property so
+        executor_v2's optional dependencies stay off the v1 import path.
+        """
+        if self._v2 is None:
+            try:
+                from executor_v2 import ExecutorV2
+            except ImportError:  # pragma: no cover - packaged imports
+                from agent.executor_v2 import ExecutorV2
+            self._v2 = ExecutorV2(self.policy, self.confirm_manager, chunk_sink=self.chunk_sink)
+        return self._v2
+
+    @staticmethod
+    def _is_v2_kind(kind: str) -> bool:
+        """True for the v2 Agent Fabric kinds (docs/v2_spec.md §2)."""
+        try:
+            from executor_v2 import V2_KINDS
+        except ImportError:  # pragma: no cover - packaged imports
+            from agent.executor_v2 import V2_KINDS
+        return kind in V2_KINDS
 
     # -----------------------------------------------------------------------
     def run(self, task) -> Result:
         kind = task.kind
+        # v2 router — everything below this line is the untouched v1 path.
+        if self._is_v2_kind(kind):
+            return self.v2.run(task)
         if kind == "shell":
             return self._run_shell(task)
         if kind == "read_file":
@@ -63,6 +92,8 @@ class Executor:
 
         log.info(f"task={task.id} confirmation approved — resuming execution")
         kind = task.kind
+        if self._is_v2_kind(kind):
+            return self.v2.resume_after_confirm(task, approved)
         try:
             if kind == "shell":
                 return self._exec_shell(task)
