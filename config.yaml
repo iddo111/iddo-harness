@@ -1,0 +1,27 @@
+# Iddo Harness — runtime configuration (v3 Track A).
+#
+# This file holds *runtime* knobs only: pacing, concurrency, transports,
+# retries, metrics. Security policy (auto/confirm/block) stays in policy.yaml.
+#
+# Every value can be overridden by an environment variable — see
+# agent/config.py ENV_OVERRIDES. ENV wins over this file, this file wins
+# over the built-in defaults.
+
+poll_interval_seconds: 5
+max_concurrent_tasks: 3
+chunk_flush_ms: 500
+chunk_max_bytes: 16384
+
+ws:
+  # Off by default: the WebSocket bridge needs an open port (or a tunnel),
+  # which the git bridge deliberately avoids. Turn it on only when you want
+  # sub-second latency and are happy to expose 127.0.0.1:8477.
+  enabled: false
+  host: 127.0.0.1
+  port: 8477
+
+retry:
+  default_max_attempts: 1
+
+metrics:
+  enabled: true
