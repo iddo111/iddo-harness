@@ -44,6 +44,78 @@ class Task:
     envelope: "amp.AmpEnvelope | None" = None
 
 
+def task_from_packet(data: dict, source_path: Path | None = None) -> "Task":
+    """
+    Build a Task from raw packet JSON, preferring the AMP v1.0 envelope
+    shape (payload.type == "harness_task") and falling back to the legacy
+    free-form task-packet shape (docs/task_packet_spec.md, top-level "kind")
+    for backward compatibility.
+
+    Module-level so transports that never touch the filesystem — the v3
+    WebSocket bridge — parse packets exactly the same way the git bridge does.
+    `source_path` is None for those.
+    """
+    label = source_path.name if source_path is not None else "<ws>"
+
+    if amp.is_amp_shaped(data):
+        return _task_from_amp(data, source_path)
+
+    if "kind" in data:
+        log.warning(
+            f"{label}: task packet is not AMP-shaped (no 'v'/'payload' "
+            f"envelope) — accepting as legacy packet per backward-compat policy. "
+            f"Producers should migrate to AMP envelopes (docs/amp_alignment.md)."
+        )
+        return _task_from_legacy(data, source_path)
+
+    # Neither AMP-shaped nor legacy-shaped (no "kind") — try AMP parsing
+    # anyway so the caller gets a precise AmpValidationError rather than
+    # a confusing KeyError/AttributeError downstream.
+    return _task_from_amp(data, source_path)
+
+
+def _task_from_amp(data: dict, source_path: Path | None = None) -> "Task":
+    """
+    Validate `data` as an AMP envelope and lift its payload.body into a
+    legacy-shaped Task (kind/payload/priority) so executor.py — which is
+    AMP-agnostic by design — needs no changes. The full envelope is retained
+    on Task.envelope so reporter.py can build a proper harness_result envelope.
+    """
+    # Legacy bridge task ids (e.g. "20260723-001-scan-dclaude") are not valid
+    # ULID/UUIDv4, but may still show up wrapped in an AMP envelope during the
+    # migration window; relax the `id` pattern check accordingly rather than
+    # hard-failing well-formed envelopes over an id-format nitpick that AMP
+    # §2.6 minor-version tolerance is meant to absorb.
+    # TODO(amp): once every producer mints proper ULID/UUIDv4 ids, switch this
+    # to id_strict=True unconditionally.
+    env_id = data.get("id", "")
+    id_strict = bool(amp._ULID_RE.match(env_id) or amp._UUID4_RE.match(str(env_id).lower()))
+    envelope = amp.parse_envelope(data, id_strict=id_strict)
+
+    body = envelope.payload.body
+    return Task(
+        id=envelope.id,
+        kind=body.get("kind", "shell"),
+        payload=body,
+        priority=body.get("priority", "normal"),
+        source_path=source_path,
+        envelope=envelope,
+    )
+
+
+def _task_from_legacy(data: dict, source_path: Path | None = None) -> "Task":
+    """Lift a pre-AMP, free-form task packet into a Task. envelope=None."""
+    fallback_id = source_path.stem if source_path is not None else ""
+    return Task(
+        id=data.get("id", fallback_id),
+        kind=data.get("kind", "shell"),
+        payload=data.get("payload", {}),
+        priority=data.get("priority", "normal"),
+        source_path=source_path,
+        envelope=None,
+    )
+
+
 class GithubPoller:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -91,70 +163,8 @@ class GithubPoller:
 
     # -----------------------------------------------------------------------
     def _task_from_packet(self, data: dict, source_path: Path) -> "Task":
-        """
-        Build a Task from raw packet JSON, preferring the AMP v1.0 envelope
-        shape (payload.type == "harness_task") and falling back to the
-        legacy free-form task-packet shape (docs/task_packet_spec.md, top-
-        level "kind") for backward compatibility.
-        """
-        if amp.is_amp_shaped(data):
-            return self._task_from_amp(data, source_path)
-
-        if "kind" in data:
-            log.warning(
-                f"{source_path.name}: task packet is not AMP-shaped (no 'v'/'payload' "
-                f"envelope) — accepting as legacy packet per backward-compat policy. "
-                f"Producers should migrate to AMP envelopes (docs/amp_alignment.md)."
-            )
-            return self._task_from_legacy(data, source_path)
-
-        # Neither AMP-shaped nor legacy-shaped (no "kind") — try AMP parsing
-        # anyway so the caller gets a precise AmpValidationError rather than
-        # a confusing KeyError/AttributeError downstream.
-        return self._task_from_amp(data, source_path)
-
-    # -----------------------------------------------------------------------
-    def _task_from_amp(self, data: dict, source_path: Path) -> "Task":
-        """
-        Validate `data` as an AMP envelope and lift its payload.body into a
-        legacy-shaped Task (kind/payload/priority) so executor.py — which is
-        AMP-agnostic by design (out of scope for this change) — needs no
-        changes. The full envelope is retained on Task.envelope so
-        reporter.py can build a proper harness_result envelope.
-        """
-        # Legacy bridge task ids (e.g. "20260723-001-scan-dclaude") are not
-        # valid ULID/UUIDv4, but may still show up wrapped in an AMP
-        # envelope during the migration window; relax the `id` pattern check
-        # accordingly rather than hard-failing well-formed envelopes over an
-        # id-format nitpick that AMP §2.6 minor-version tolerance is meant
-        # to absorb.
-        # TODO(amp): once every producer mints proper ULID/UUIDv4 ids,
-        # switch this to id_strict=True unconditionally.
-        env_id = data.get("id", "")
-        id_strict = bool(amp._ULID_RE.match(env_id) or amp._UUID4_RE.match(str(env_id).lower()))
-        envelope = amp.parse_envelope(data, id_strict=id_strict)
-
-        body = envelope.payload.body
-        return Task(
-            id=envelope.id,
-            kind=body.get("kind", "shell"),
-            payload=body,
-            priority=body.get("priority", "normal"),
-            source_path=source_path,
-            envelope=envelope,
-        )
-
-    # -----------------------------------------------------------------------
-    def _task_from_legacy(self, data: dict, source_path: Path) -> "Task":
-        """Lift a pre-AMP, free-form task packet into a Task. envelope=None."""
-        return Task(
-            id=data.get("id", source_path.stem),
-            kind=data.get("kind", "shell"),
-            payload=data.get("payload", {}),
-            priority=data.get("priority", "normal"),
-            source_path=source_path,
-            envelope=None,
-        )
+        """Delegate to the module-level parser (shared with the WS bridge)."""
+        return task_from_packet(data, source_path)
 
     # -----------------------------------------------------------------------
     def scan_pending(self, confirm_manager) -> list[tuple[Task, bool]]:

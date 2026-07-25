@@ -28,6 +28,7 @@ import json
 import logging
 import secrets
 import threading
+from http import HTTPStatus
 from typing import Any, Callable, Iterable
 
 log = logging.getLogger("iddo-harness.ws")
@@ -86,69 +87,30 @@ def extract_token(headers: Any) -> str | None:
     return None
 
 
-class _WsTask:
-    """A task packet that arrived over a socket instead of the bridge repo.
+def task_from_json(doc: dict[str, Any]) -> Any:
+    """Build a :class:`agent.poller.Task` from an inbound packet.
 
-    Shaped like :class:`agent.poller.Task` so the executor, policy engine and
-    reporters need no idea where it came from.
-    """
+    Delegates to ``poller.task_from_packet`` rather than re-implementing the
+    AMP/legacy split, so a packet means exactly the same thing arriving over a
+    socket as it does arriving in the bridge repo — including the relaxed id
+    check that lets migration-era envelopes through.
 
-    __slots__ = ("id", "kind", "payload", "priority", "source_path", "envelope")
-
-    def __init__(self, task_id: str, kind: str, payload: dict[str, Any],
-                 priority: str = "normal", envelope: Any = None) -> None:
-        self.id = task_id
-        self.kind = kind
-        self.payload = payload
-        self.priority = priority
-        self.source_path = None
-        self.envelope = envelope
-
-
-def task_from_json(doc: dict[str, Any]) -> _WsTask:
-    """Build a task from an inbound packet, AMP-shaped or legacy.
-
-    Mirrors ``poller._task_from_packet``: AMP envelopes are validated by
-    ``amp.py`` and the body becomes the payload; a bare packet is read
-    directly. An id is minted when the producer omits one, because over a
-    socket the reply address is the socket itself — the id is only needed to
-    correlate chunks.
+    An id is minted for a legacy packet that omits one: over a socket the reply
+    address *is* the socket, so the id only has to correlate chunks.
     """
     try:
         import amp
+        from poller import task_from_packet
     except ImportError:  # pragma: no cover - package layout
         from agent import amp  # type: ignore[no-redef]
+        from agent.poller import task_from_packet  # type: ignore[no-redef]
 
-    if amp.is_amp_shaped(doc):
-        envelope = amp.parse(doc, relaxed_id=True) if _accepts_relaxed(amp.parse) else amp.parse(doc)
-        body = envelope.payload.body
-        return _WsTask(
-            task_id=envelope.id,
-            kind=str(body.get("kind", "shell")),
-            payload=body,
-            priority=str(body.get("priority", "normal")),
-            envelope=envelope,
-        )
-
-    payload = doc.get("payload") if isinstance(doc.get("payload"), dict) else {}
-    task_id = str(doc.get("id") or f"ws-{secrets.token_hex(6)}")
-    if not doc.get("kind"):
-        raise ValueError("task packet needs a 'kind'")
-    return _WsTask(
-        task_id=task_id,
-        kind=str(doc["kind"]),
-        payload=dict(payload),
-        priority=str(doc.get("priority", "normal")),
-    )
-
-
-def _accepts_relaxed(func: Callable[..., Any]) -> bool:
-    import inspect
-
-    try:
-        return "relaxed_id" in inspect.signature(func).parameters
-    except (TypeError, ValueError):  # pragma: no cover
-        return False
+    if not amp.is_amp_shaped(doc):
+        if not doc.get("kind"):
+            raise ValueError("task packet needs a 'kind'")
+        if not doc.get("id"):
+            doc = {**doc, "id": f"ws-{secrets.token_hex(6)}"}
+    return task_from_packet(doc, None)
 
 
 class WsBridge:
@@ -179,6 +141,7 @@ class WsBridge:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
+        self._shutdown: asyncio.Event | None = None
 
     @property
     def bound_port(self) -> int:
@@ -214,6 +177,28 @@ class WsBridge:
 
         async for message in connection:
             await self._run_one(connection, message)
+
+    def process_request(self, connection: Any, request: Any) -> Any:
+        """Reject during the handshake, before a WebSocket even exists.
+
+        An unauthenticated caller gets a plain HTTP ``401`` rather than an
+        upgrade followed by a close frame: there is no reason to hand someone a
+        socket only to take it away, and a 401 is what a non-WebSocket probe
+        (curl, a scanner, a misconfigured consumer) can actually understand.
+        :meth:`handle` re-checks anyway, so a transport that cannot reject early
+        is still safe.
+        """
+        headers = getattr(request, "headers", None)
+        if not token_matches(extract_token(headers), self.token):
+            log.warning("ws: rejected unauthenticated handshake")
+            if self.metrics is not None:
+                self.metrics.incr("ws_rejected")
+            return connection.respond(HTTPStatus.UNAUTHORIZED, "unauthorized\n")
+
+        path = str(getattr(request, "path", "") or "")
+        if path.split("?")[0].rstrip("/") not in {TASK_PATH, ""}:
+            return connection.respond(HTTPStatus.NOT_FOUND, f"unknown path: {path}\n")
+        return None
 
     def _authorised(self, connection: Any) -> bool:
         request = getattr(connection, "request", None)
@@ -267,10 +252,15 @@ class WsBridge:
 
         async def main() -> None:
             self._loop = asyncio.get_running_loop()
-            async with websockets.serve(self.handle, self.host, self.port) as server:
+            # Created inside the loop that will wait on it; stop() sets it from
+            # the caller's thread via call_soon_threadsafe.
+            self._shutdown = asyncio.Event()
+            async with websockets.serve(
+                self.handle, self.host, self.port, process_request=self.process_request
+            ) as server:
                 self._server = server
                 self._ready.set()
-                await asyncio.Future()
+                await self._shutdown.wait()
 
         try:
             asyncio.run(main())
@@ -282,11 +272,18 @@ class WsBridge:
             self._ready.set()
 
     def stop(self) -> None:
+        """Close the listener and join the serving thread.
+
+        The shutdown is a signal rather than ``loop.stop()``: stopping the loop
+        outright returns from ``asyncio.run`` without unwinding
+        ``websockets.serve``, which leaves the listening socket open and the
+        port unusable until the process exits.
+        """
         loop, self._loop = self._loop, None
-        server, self._server = self._server, None
-        if loop is not None and server is not None:
-            loop.call_soon_threadsafe(server.close)
-            loop.call_soon_threadsafe(loop.stop)
+        shutdown, self._shutdown = self._shutdown, None
+        self._server = None
+        if loop is not None and shutdown is not None:
+            loop.call_soon_threadsafe(shutdown.set)
         if self._thread is not None:
             self._thread.join(timeout=5)
             self._thread = None
