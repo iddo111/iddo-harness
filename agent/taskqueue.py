@@ -14,6 +14,10 @@ filename order. v3 puts a scheduler in between so a producer can express
 All four are read from the task payload, i.e. the AMP ``payload.body``, so
 ``agent/amp.py`` needs no envelope changes. A packet carrying none of them
 behaves exactly as it did in v2: plain FIFO within the ``normal`` band.
+
+Named ``taskqueue`` and not ``queue``: ``agent/`` sits on ``sys.path`` in both
+the script and installed layouts, so a ``queue.py`` here would shadow the
+stdlib ``queue`` that ``executor_v2`` uses for its streaming pipes.
 """
 from __future__ import annotations
 

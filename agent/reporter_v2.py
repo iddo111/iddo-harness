@@ -39,6 +39,11 @@ from typing import Any
 
 import amp
 
+try:
+    from locks import GIT_PUSH_LOCK
+except ImportError:  # installed as a package
+    from agent.locks import GIT_PUSH_LOCK
+
 log = logging.getLogger("harness.reporter_v2")
 
 # Same identity constants as v1's reporter — the harness is one AMP brick
@@ -77,6 +82,11 @@ class ReporterV2:
         )
         self._instance = getattr(cfg, "owner", None) or "agent-default"
         self._lock = threading.Lock()
+        # Separate from _lock: git is a single-writer resource, so several
+        # worker threads finishing at once must not interleave add/commit/push
+        # in the same working copy. Shared process-wide because the v1 reporter
+        # and the poller write into the same clone.
+        self._git_lock = GIT_PUSH_LOCK
         self._pending: list[Path] = []
         self._last_flush = time.time()
 
@@ -120,6 +130,23 @@ class ReporterV2:
             task, {"ok": False, "decision": "error", "error": err_msg}, seq=0, is_final=True
         )
 
+    def send_attempt(self, task: Any, result: Any, attempt: int) -> Path:
+        """Record one retry attempt as ``results/<id>-attempt-<n>.json``.
+
+        Deliberately *not* a chunk: attempt files sit outside the ``seq`` /
+        ``is_final`` stream so a consumer following the chunk protocol never
+        sees two finals for one task. They are diagnostics — the authoritative
+        outcome is still the final chunk of the last attempt.
+        """
+        body = asdict(result) if is_dataclass(result) and not isinstance(result, type) else dict(result)
+        body = {**body, "task_id": task.id, "attempt": attempt}
+        path = self._local / self.result_dir / f"{task.id}-attempt-{attempt}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self._wrap(task, body), indent=2, ensure_ascii=False), encoding="utf-8")
+        with self._lock:
+            self._pending.append(path)
+        return path
+
     def flush(self, message: str = "results: chunk batch") -> None:
         """Commit and push every chunk written since the last flush."""
         with self._lock:
@@ -128,9 +155,10 @@ class ReporterV2:
         if not pending or not self.git_push:
             return
         args = ["git", "-C", str(self._local)]
-        subprocess.run(args + ["add", *[str(p) for p in pending]], check=False, capture_output=True)
-        subprocess.run(args + ["commit", "-m", message], check=False, capture_output=True)
-        subprocess.run(args + ["push", "--quiet"], check=False, capture_output=True)
+        with self._git_lock:
+            subprocess.run(args + ["add", *[str(p) for p in pending]], check=False, capture_output=True)
+            subprocess.run(args + ["commit", "-m", message], check=False, capture_output=True)
+            subprocess.run(args + ["push", "--quiet"], check=False, capture_output=True)
         log.info(f"pushed {len(pending)} chunk file(s): {message}")
 
     # -----------------------------------------------------------------------

@@ -479,6 +479,13 @@ class ExecutorV2:
 
     def run(self, task: Any) -> Result:
         """Policy-gate and execute ``task``, returning a v1-shaped Result."""
+        if self.cancel_requested(task.id):
+            # Cancelled in the window between leaving the queue and starting.
+            self.clear_cancel(task.id)
+            return Result(
+                task_id=task.id, ok=False, decision="cancelled",
+                error="cancelled before execution", metadata={"cancelled": True},
+            )
         handler = self._gated_handlers().get(task.kind)
         if handler is None:
             return Result(task_id=task.id, ok=False, decision="unknown_kind", error=f"unknown kind: {task.kind}")
@@ -872,6 +879,9 @@ class ExecutorV2:
                 self.watches.pop(wid).stop()
             except Exception:  # pragma: no cover
                 pass
+        with self._running_lock:
+            self._running.clear()
+            self._cancelled.clear()
 
     # -----------------------------------------------------------------------
     # 5. grep

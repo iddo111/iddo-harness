@@ -20,6 +20,11 @@ from typing import Any
 
 import amp
 
+try:
+    from locks import GIT_PUSH_LOCK
+except ImportError:  # installed as a package
+    from agent.locks import GIT_PUSH_LOCK
+
 log = logging.getLogger("harness.poller")
 
 
@@ -215,6 +220,9 @@ class GithubPoller:
 
     # -----------------------------------------------------------------------
     def _commit_and_push(self, msg: str):
-        subprocess.run(["git", "-C", str(self._local), "add", "-A"], check=False, capture_output=True)
-        subprocess.run(["git", "-C", str(self._local), "commit", "-m", msg, "--allow-empty"], check=False, capture_output=True)
-        subprocess.run(["git", "-C", str(self._local), "push", "--quiet"], check=False, capture_output=True)
+        # `add -A` sweeps up whatever the reporters have written, so this must
+        # not interleave with their commits — hence the shared lock.
+        with GIT_PUSH_LOCK:
+            subprocess.run(["git", "-C", str(self._local), "add", "-A"], check=False, capture_output=True)
+            subprocess.run(["git", "-C", str(self._local), "commit", "-m", msg, "--allow-empty"], check=False, capture_output=True)
+            subprocess.run(["git", "-C", str(self._local), "push", "--quiet"], check=False, capture_output=True)
