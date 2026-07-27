@@ -59,6 +59,15 @@ auto_allow:
     - "http_local POST http://127.0.0.1*"
     - "http_local POST http://localhost*"
 
+    # --- v3 Agent-Native (docs/v3_track_c.md) --------------------------------
+    # הזיכרון הוא ה-scratch store של ה-agent עצמו ב-~/.iddo-harness/memory.db,
+    # לא הקבצים שלך. הוא לא מחזיק כלום שלא נתת ל-agent מלכתחילה, והבעלים יכול
+    # לקרוא אותו ישירות ב-sqlite3 CLI בלי להריץ את ה-agent — לכן כתיבה ומחיקה
+    # אוטומטיות. הקריאות (memory_get / memory_list) לא עוברות בשער בכלל,
+    # ראה `_UNGATED_KINDS` ב-agent/executor_v3.py.
+    - "memory_set *"
+    - "memory_delete *"
+
   paths:
     read:
       - "D:\\CLAUDE\\**"
@@ -97,6 +106,13 @@ require_confirm:
     - "http_local * http://172.1[6-9].*"
     - "http_local * http://172.2[0-9].*"
     - "http_local * http://172.3[01].*"
+
+    # --- v3 Agent-Native (docs/v3_track_c.md §6) -----------------------------
+    # תזמון זה הרצה עתידית בלי שאף אחד מסתכל — בדיוק הדבר שהבעלים צריך לאשר
+    # פעם אחת מראש. הביטול גם דורש אישור: להשתיק בשקט משהו שביקשת זה לא פחות
+    # מפתיע מלהוסיף אותו. `schedule_list` היא קריאה ולא עוברת בשער.
+    - "schedule *"
+    - "schedule_cancel *"
 
   paths:
     write:

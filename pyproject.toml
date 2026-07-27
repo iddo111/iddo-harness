@@ -24,6 +24,9 @@ agentfabric = ["watchdog>=4.0.0", "psutil>=5.9.0", "websockets>=12.0"]
 # harness runs without it, but every result it publishes is then unforgeable by
 # nobody, and {{secret:...}} references cannot be resolved.
 security = ["cryptography>=42.0.0"]
+# v3 Agent-Native: schedule_task prefers croniter for cron expressions and
+# degrades to a built-in 5-field parser when absent.
+agentnative = ["croniter>=2.0.0"]
 
 [project.scripts]
 iddo-harness = "agent.cli:cli"

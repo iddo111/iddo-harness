@@ -4,6 +4,14 @@
 
 ---
 
+## v3 Highlights
+
+v3 מגיע בשלושה מסלולים שנבנו במקביל ומוזגו יחד: **Track A** (זמן אמת וביצועים),
+**Track B** (אבטחה ואמון) ו-**Track C** (יכולות סוכן). כל אחד עומד בפני עצמו,
+ואף אחד מהם לא שובר packet של v1 או v2.
+
+---
+
 ## v3 Track A — Realtime & Performance
 
 v2 נתן יכולות; Track A מטפל ב-latency ובמה שסביבו. המפרט המלא:
@@ -43,6 +51,37 @@ v2 נתן יכולות; Track B עונה על "למה שמישהו יסמוך ע
 מפתחות — תוצאות יוצאות בלי חתימה, עם warning אחד. ב-`amp.py` לא נגענו.
 
 **תלות חדשה (אופציונלית):** `cryptography>=42.0.0` (`pip install 'iddo-harness[security]'`).
+
+---
+
+## v3 Track C — Agent-Native Capabilities
+
+v3 מוסיף 7 יכולות (14 `kind`ים) שהופכות את ה-harness מזוג ידיים לסוכן: הוא מסדר
+תלויות, זוכר, ופועל גם כשאף אחד לא מבקש. המפרט המלא:
+[`docs/v3_track_c.md`](docs/v3_track_c.md).
+
+| יכולת | `kind` | מה זה נותן |
+|---|---|---|
+| Sub-tasks | `spawn_task` / `await_tasks` | fan-out מקבילי + join, במקום עשר נסיעות רשת |
+| Workflow DAG | `workflow` | גרף תלויות שה-harness פותר לבד, עם `${nodes.x.stdout}` בין צמתים |
+| Memory | `memory_set` / `_get` / `_list` / `_delete` | SQLite מקומי — משהו ששורד את ה-task, עם TTL, tags ו-namespaces |
+| Scheduler | `schedule_task` / `_list` / `_cancel` | cron / interval / one-shot; "כל בוקר ב-6" בלי producer שלא ישן |
+| LLM tool loop | `llm_task` | "תבין את זה על המכונה" כ-kind, דרך אותו policy ואותו audit trail |
+| Handshake | `handshake` | נסיעה אחת שאומרת מה ה-harness יודע לעשות, עם negotiation |
+| Templates | `run_template` / `template_list` | 5 עבודות מוכנות שנפרשות ל-workflow רגיל |
+
+**עקרונות:** אין מסלול הרצה שני — כל sub-task, צומת workflow, firing מתוזמן,
+tool call של מודל ותבנית שנפרשה חוזרים דרך `Executor.run()` ופוגשים את
+`PolicyEngine` בזכות עצמם. Policy נאכף **על הילד, לא על המעטפה**: לבקש אישור על
+`workflow` זה לבקש מהבעלים לאשר מכולה שהוא לא רואה מה בתוכה. ו-`llm_task` **עוצר**
+על `confirm_required` — מודל שיכול לעבור שער אישור מבטל את השער.
+
+**Backward compat:** כל packet של v1 ו-v2 ממשיך לרוץ בדיוק כמו קודם.
+ב-`agent/amp.py` וב-`agent/executor_v2.py` לא נגענו, וה-hook של v3 הוא שלוש
+שורות ניתוב מעל מסלול v1. packet של v1 בכלל לא בונה את `ExecutorV3`.
+
+**תלות חדשה (אופציונלית):** `croniter>=2.0.0`. בלעדיה יש parser פנימי ל-cron
+בחמישה שדות, ו-`validate_cron` עונה אותו דבר בשני המקרים.
 
 ---
 
@@ -148,8 +187,16 @@ iddo-harness/
 ├── agent/                    # ה-agent עצמו
 │   ├── main.py              # הכניסה הראשית
 │   ├── poller.py            # מושך משימות מ-GitHub
-│   ├── executor.py          # מבצע פקודות (v1) + router ל-v2
+│   ├── executor.py          # מבצע פקודות (v1) + router ל-v2 ול-v3
 │   ├── executor_v2.py       # 14 ה-kinds של Agent Fabric (v2)
+│   ├── executor_v3.py       # 14 ה-kinds של Agent-Native (v3)
+│   ├── subtasks.py          # spawn_task / await_tasks
+│   ├── workflow.py          # גרף התלויות (kind: workflow)
+│   ├── memory.py            # זיכרון מתמיד ב-SQLite
+│   ├── scheduler.py         # cron / interval / one-shot
+│   ├── llm_task.py          # לופ הכלים של המודל + mock providers
+│   ├── handshake.py         # גילוי יכולות ו-negotiation
+│   ├── templates.py         # 5 התבניות המוכנות
 │   ├── reporter.py          # מדווח תוצאות
 │   ├── reporter_v2.py       # דיווח בצ'אנקים (streaming)
 │   ├── policy.py            # אכיפת policy
@@ -178,6 +225,7 @@ iddo-harness/
 │   ├── security_v3.md
 │   ├── v2_spec.md
 │   ├── v3_track_a.md
+│   ├── v3_track_c.md
 │   └── troubleshooting.md
 ├── config.yaml              # קונפיג ריצה (v3)
 └── policy.yaml              # policy קונפיג

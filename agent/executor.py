@@ -56,6 +56,7 @@ class Executor:
         self.vault = vault
         self.audit_log = audit_log
         self._v2 = None
+        self._v3 = None
 
     # -----------------------------------------------------------------------
     @property
@@ -85,9 +86,39 @@ class Executor:
         return kind in V2_KINDS
 
     # -----------------------------------------------------------------------
+    @property
+    def v3(self):
+        """Lazily-built ExecutorV3, cached so the memory store, scheduler and
+        in-flight sub-tasks outlive a single polling cycle. It receives *this*
+        executor as its parent so a sub-task, workflow node or LLM tool call of
+        any kind re-enters at the router and meets policy on its own terms.
+        """
+        if self._v3 is None:
+            try:
+                from executor_v3 import ExecutorV3
+            except ImportError:  # pragma: no cover - packaged imports
+                from agent.executor_v3 import ExecutorV3
+            self._v3 = ExecutorV3(
+                self.policy, self.confirm_manager,
+                chunk_sink=self.chunk_sink, parent_executor=self,
+            )
+        return self._v3
+
+    @staticmethod
+    def _is_v3_kind(kind: str) -> bool:
+        """True for the v3 agent-native kinds (docs/v3_track_c.md)."""
+        try:
+            from executor_v3 import V3_KINDS
+        except ImportError:  # pragma: no cover - packaged imports
+            from agent.executor_v3 import V3_KINDS
+        return kind in V3_KINDS
+
+    # -----------------------------------------------------------------------
     def run(self, task) -> Result:
         kind = task.kind
-        # v2 router — everything below this line is the untouched v1 path.
+        # v3 / v2 routers — everything below this line is the untouched v1 path.
+        if self._is_v3_kind(kind):
+            return self.v3.run(task)
         if self._is_v2_kind(kind):
             return self.v2.run(task)
         if kind == "shell":
@@ -114,6 +145,8 @@ class Executor:
 
         log.info(f"task={task.id} confirmation approved — resuming execution")
         kind = task.kind
+        if self._is_v3_kind(kind):
+            return self.v3.resume_after_confirm(task, approved)
         if self._is_v2_kind(kind):
             return self.v2.resume_after_confirm(task, approved)
         try:

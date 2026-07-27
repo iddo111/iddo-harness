@@ -12,3 +12,6 @@ websockets>=12.0
 # results go out unsigned, and a task referencing {{secret:...}} fails loudly
 # instead of leaking a placeholder to a remote endpoint.
 cryptography>=42.0.0
+# v3 Track C: cron parsing for the scheduler (agent/scheduler.py). Optional — a
+# built-in five-field parser answers the same questions when it is absent.
+croniter>=2.0.0
