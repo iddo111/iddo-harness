@@ -16,6 +16,13 @@ try:
 except ImportError:  # pragma: no cover - fallback for packaged imports
     from agent.confirm import ConfirmManager
 
+try:
+    import sandbox as sandbox_mod
+    import secrets_vault
+except ImportError:  # pragma: no cover - fallback for packaged imports
+    from agent import sandbox as sandbox_mod
+    from agent import secrets_vault
+
 log = logging.getLogger("harness.executor")
 
 
@@ -32,10 +39,22 @@ class Result:
 
 
 class Executor:
-    def __init__(self, policy: PolicyEngine, confirm_manager: "ConfirmManager | None" = None, chunk_sink=None):
+    def __init__(
+        self,
+        policy: PolicyEngine,
+        confirm_manager: "ConfirmManager | None" = None,
+        chunk_sink=None,
+        vault=None,
+        audit_log=None,
+    ):
         self.policy = policy
         self.confirm_manager = confirm_manager or ConfirmManager(getattr(policy, "cfg", None))
         self.chunk_sink = chunk_sink
+        # v3 Track B: shared with ExecutorV2 so `{{secret:...}}` and the
+        # sandbox behave the same whether a task arrives as v1 `shell` or v2
+        # `shell_stream`. Both default to None → previous behaviour exactly.
+        self.vault = vault
+        self.audit_log = audit_log
         self._v2 = None
 
     # -----------------------------------------------------------------------
@@ -50,7 +69,10 @@ class Executor:
                 from executor_v2 import ExecutorV2
             except ImportError:  # pragma: no cover - packaged imports
                 from agent.executor_v2 import ExecutorV2
-            self._v2 = ExecutorV2(self.policy, self.confirm_manager, chunk_sink=self.chunk_sink)
+            self._v2 = ExecutorV2(
+                self.policy, self.confirm_manager, chunk_sink=self.chunk_sink,
+                vault=self.vault, audit_log=self.audit_log,
+            )
         return self._v2
 
     @staticmethod
@@ -135,8 +157,18 @@ class Executor:
         """Actually invoke the shell command (used by auto path and by resume_after_confirm)."""
         cmd = task.payload.get("command", "")
         try:
+            # Resolve `{{secret:name}}` here, one call before Popen, and scrub
+            # the values out of the output — the command may well echo its own
+            # arguments, and stdout is committed to the bridge repo verbatim.
+            cmd, used = secrets_vault.resolve_with(self.vault, cmd)
+            secret_values = tuple(used.values())
+        except secrets_vault.VaultError as e:
+            return Result(task_id=task.id, ok=False, decision="auto", error=str(e))
+
+        level = sandbox_mod.level_for_kind(getattr(self.policy, "cfg", None), task.kind)
+        try:
             proc = subprocess.run(
-                cmd,
+                sandbox_mod.wrap_popen_args(cmd, level, task.payload.get("cwd")),
                 shell=True,
                 capture_output=True,
                 text=True,
@@ -146,9 +178,10 @@ class Executor:
                 task_id=task.id,
                 ok=proc.returncode == 0,
                 decision="auto",
-                stdout=proc.stdout[-16000:],
-                stderr=proc.stderr[-4000:],
+                stdout=secrets_vault.redact(proc.stdout, secret_values)[-16000:],
+                stderr=secrets_vault.redact(proc.stderr, secret_values)[-4000:],
                 exit_code=proc.returncode,
+                metadata={"sandbox": level} if level != sandbox_mod.LEVEL_NONE else {},
             )
         except subprocess.TimeoutExpired:
             return Result(task_id=task.id, ok=False, decision="auto", error="timeout")

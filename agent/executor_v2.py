@@ -72,6 +72,13 @@ try:
 except ImportError:  # pragma: no cover - packaged import
     from agent.executor import Result
 
+try:
+    import sandbox as sandbox_mod
+    import secrets_vault
+except ImportError:  # pragma: no cover - packaged import
+    from agent import sandbox as sandbox_mod
+    from agent import secrets_vault
+
 try:  # optional
     import psutil
 except ImportError:  # pragma: no cover - exercised on bare installs
@@ -138,6 +145,10 @@ class ShellSession:
     idle_timeout_sec: float = _DEFAULT_IDLE_TIMEOUT_SEC
     created_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
+    #: Secret values that were substituted into this session's command or into
+    #: anything typed at it, kept so every drain can be scrubbed. A REPL echoes
+    #: its input, so a credential typed once comes straight back out.
+    secret_values: tuple[str, ...] = ()
     _stdout: list[str] = field(default_factory=list)
     _stderr: list[str] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -373,11 +384,18 @@ class ExecutorV2:
         confirm_manager: ConfirmManager | None = None,
         chunk_sink: Callable[[Any, dict[str, Any], int, bool], None] | None = None,
         max_sessions: int = _DEFAULT_MAX_SESSIONS,
+        vault: Any | None = None,
+        audit_log: Any | None = None,
     ) -> None:
         self.policy = policy
         self.confirm_manager = confirm_manager or ConfirmManager(getattr(policy, "cfg", None))
         self.chunk_sink = chunk_sink
         self.max_sessions = max_sessions
+        # v3 Track B: secret resolution and sandboxing. Both are opt-in —
+        # `vault` is None on installs that never ran `installer.gen_keys`, and
+        # the sandbox level comes from policy.yaml and defaults to "none".
+        self.vault = vault
+        self.audit_log = audit_log
         self.sessions: dict[str, ShellSession] = {}
         self.watches: dict[str, FileWatch] = {}
         self._seq: dict[str, int] = {}
@@ -566,6 +584,44 @@ class ExecutorV2:
             )
         return decision, reason, None
 
+    # -----------------------------------------------------------------------
+    # Secrets / sandbox helpers (docs/security_v3.md §2-3)
+    # -----------------------------------------------------------------------
+    def _resolve_secrets(self, text: str) -> tuple[str, tuple[str, ...]]:
+        """Substitute ``{{secret:name}}`` and return the resolved values.
+
+        The values come back so the caller can scrub them out of whatever the
+        command prints — a resolved credential that reaches ``results/`` is
+        committed to git history and effectively public.
+        """
+        resolved, used = secrets_vault.resolve_with(self.vault, text)
+        return resolved, tuple(used.values())
+
+    def _resolve_secrets_in(self, value: Any) -> tuple[Any, tuple[str, ...]]:
+        """:meth:`_resolve_secrets` for nested headers/bodies."""
+        if self.vault is None or not self.vault.available:
+            return value, ()
+        resolved, used = self.vault.resolve_structure(value)
+        return resolved, tuple(used.values())
+
+    @staticmethod
+    def _scrub(text: str, values: Iterable[str] = ()) -> str:
+        """Redact secret values out of command output."""
+        return secrets_vault.redact(text, values)
+
+    def _sandbox_level(self, kind: str) -> str:
+        """Sandbox level configured for ``kind`` in policy.yaml."""
+        return sandbox_mod.level_for_kind(getattr(self.policy, "cfg", None), kind)
+
+    def _audit(self, actor: str, action: str, resource: str = "", outcome: str = "ok", **meta: Any) -> None:
+        """Append one audit record when an audit log is wired up."""
+        if self.audit_log is None:
+            return
+        try:
+            self.audit_log.record(actor=actor, action=action, resource=resource, outcome=outcome, meta=meta)
+        except Exception:  # pragma: no cover - auditing must never break a task
+            log.exception(f"audit failed for {action}")
+
     def _next_seq(self, task_id: str) -> int:
         """Return the next monotonically increasing chunk sequence number."""
         seq = self._seq.get(task_id, 0)
@@ -600,8 +656,18 @@ class ExecutorV2:
         max_chunk = int(task.payload.get("max_chunk_bytes", 16000))
 
         try:
+            command, secret_values = self._resolve_secrets(command)
+        except secrets_vault.VaultError as e:
+            self._audit(task.id, "secret_resolve", "shell_stream", "error", error=str(e))
+            body = self._emit(task, {"ok": False, "decision": decision, "error": str(e)}, is_final=True)
+            return Result(task_id=task.id, ok=False, decision=decision, error=str(e), metadata={"final_chunk": body})
+
+        level = self._sandbox_level(task.kind)
+        launch = sandbox_mod.wrap_popen_args(command, level, cwd)
+
+        try:
             proc = subprocess.Popen(
-                command,
+                launch,
                 shell=True,
                 cwd=cwd,
                 stdout=subprocess.PIPE,
@@ -642,6 +708,9 @@ class ExecutorV2:
             if not force and "\n" not in text and len(text) < max_chunk and (time.time() - last_flush) < flush_interval:
                 return
             buffers[stream] = ""
+            # Scrub before the chunk leaves the process: a command that echoes
+            # its own arguments would otherwise commit the credential to git.
+            text = self._scrub(text, secret_values)
             totals[stream] += len(text)
             (collected if stream == "stdout" else collected_err).append(text)
             self._emit(task, {"stream": stream, "text": text})
@@ -727,6 +796,7 @@ class ExecutorV2:
                 "streamed": True,
                 "chunks": chunks,
                 "cancelled": cancelled,
+                "sandbox": level,
                 "final_chunk": body,
             },
         )
@@ -765,11 +835,21 @@ class ExecutorV2:
                 error=f"session limit reached ({self.max_sessions})",
             )
 
+        # `command` stays the un-substituted template everywhere it is stored or
+        # reported; only `launch` carries real credentials, and it dies with the
+        # Popen call. Session metadata is published to results/, so a resolved
+        # command must never be written onto the session object.
         command = task.payload.get("command") or _default_shell()
+        cwd = task.payload.get("cwd") or None
+        try:
+            resolved, secret_values = self._resolve_secrets(command)
+        except secrets_vault.VaultError as e:
+            return Result(task_id=task.id, ok=False, decision=decision, error=str(e))
+        level = self._sandbox_level(task.kind)
         proc = subprocess.Popen(
-            command,
+            sandbox_mod.wrap_popen_args(resolved, level, cwd),
             shell=True,
-            cwd=task.payload.get("cwd") or None,
+            cwd=cwd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -782,13 +862,19 @@ class ExecutorV2:
             proc=proc,
             idle_timeout_sec=float(task.payload.get("idle_timeout_sec", _DEFAULT_IDLE_TIMEOUT_SEC)),
         )
+        session.secret_values = secret_values
         session.start_readers()
         self.sessions[session.session_id] = session
         # A session outlives the task that opened it, so keep the handle under
         # that task id: cancelling the opening task is how a consumer kills a
         # REPL it no longer wants without knowing the session id.
         self._register_running(task.id, session)
-        meta = {"session_id": session.session_id, "pid": proc.pid, "command": command}
+        meta = {
+            "session_id": session.session_id,
+            "pid": proc.pid,
+            "command": command,
+            "sandbox": level,
+        }
         log.info(f"session {session.session_id} opened pid={proc.pid}")
         return Result(task_id=task.id, ok=True, decision=decision, stdout=session.session_id, metadata=meta)
 
@@ -817,6 +903,12 @@ class ExecutorV2:
             return Result(task_id=task.id, ok=False, decision=decision, error=f"no such session: {sid}")
 
         text = task.payload.get("input", "")
+        try:
+            text, used = self._resolve_secrets(text)
+        except secrets_vault.VaultError as e:
+            return Result(task_id=task.id, ok=False, decision=decision, error=str(e))
+        if used:
+            session.secret_values = tuple({*session.secret_values, *used})
         if text and not text.endswith("\n"):
             text += "\n"
         read_timeout = float(task.payload.get("read_timeout_sec", 2.0))
@@ -846,7 +938,8 @@ class ExecutorV2:
         out_parts.append(o)
         err_parts.append(e)
 
-        stdout, stderr = "".join(out_parts), "".join(err_parts)
+        stdout = self._scrub("".join(out_parts), session.secret_values)
+        stderr = self._scrub("".join(err_parts), session.secret_values)
         session.last_activity = time.time()
         return Result(
             task_id=task.id, ok=True, decision=decision, stdout=stdout, stderr=stderr,
@@ -862,6 +955,8 @@ class ExecutorV2:
         stdout, stderr = session.drain()
         exit_code = session.close()
         self._forget_handle(session)
+        stdout = self._scrub(stdout, session.secret_values)
+        stderr = self._scrub(stderr, session.secret_values)
         return Result(
             task_id=task.id, ok=True, decision="auto", stdout=stdout, stderr=stderr, exit_code=exit_code,
             metadata={"session_id": sid, "closed": True, "uptime_sec": round(time.time() - session.created_at, 3)},
@@ -1205,6 +1300,10 @@ class ExecutorV2:
 
         body = {"pid": pid, "name": name, "signal": sig, "killed": killed}
         log.info(f"process_kill pid={pid} name={name} signal={sig} killed={killed}")
+        self._audit(
+            task.id, "process_kill", f"pid:{pid}", "ok" if killed else "error",
+            name=name, signal=sig,
+        )
         return Result(task_id=task.id, ok=killed, decision=decision, metadata=body)
 
     # -----------------------------------------------------------------------
@@ -1228,7 +1327,21 @@ class ExecutorV2:
         if not ok_local:
             return Result(task_id=task.id, ok=False, decision=decision, error=why)
 
+        # Credentials belong in a header, so this is the one v2 kind where the
+        # secret is in a nested field rather than a command line. `headers` here
+        # is the resolved copy sent on the wire; the response is scrubbed below,
+        # and the request headers are never echoed into the result.
         headers = {str(k): str(v) for k, v in (p.get("headers") or {}).items()}
+        try:
+            headers, header_secrets = self._resolve_secrets_in(headers)
+            body_secrets: tuple[str, ...] = ()
+            if isinstance(p.get("body"), (str, dict, list)):
+                resolved_body, body_secrets = self._resolve_secrets_in(p.get("body"))
+                p = {**p, "body": resolved_body}
+        except secrets_vault.VaultError as e:
+            return Result(task_id=task.id, ok=False, decision=decision, error=str(e))
+        secret_values = tuple({*header_secrets, *body_secrets})
+
         body_in = p.get("body")
         data: bytes | None = None
         if body_in is not None:
@@ -1249,7 +1362,7 @@ class ExecutorV2:
             return Result(task_id=task.id, ok=False, decision=decision, error=f"{type(e).__name__}: {e}")
 
         truncated = len(raw) > max_bytes
-        text = raw[:max_bytes].decode("utf-8", errors="replace")
+        text = self._scrub(raw[:max_bytes].decode("utf-8", errors="replace"), secret_values)
         body = {
             "url": url, "method": method, "status": status, "headers": resp_headers,
             "body": text, "truncated": truncated, "elapsed_ms": round((time.time() - started) * 1000, 2),

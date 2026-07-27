@@ -24,6 +24,28 @@ v2 נתן יכולות; Track A מטפל ב-latency ובמה שסביבו. המ�
 
 ---
 
+## v3 Track B — Security & Trust
+
+v2 נתן יכולות; Track B עונה על "למה שמישהו יסמוך על זה?". המפרט המלא:
+[`docs/security_v3.md`](docs/security_v3.md).
+
+| יכולת | מה זה נותן |
+|---|---|
+| **חתימת תוצאות** | כל תוצאה ו-chunk נחתמים Ed25519 מעל JSON קנוני. push access לריפו כבר לא מספיק כדי לזייף `results/<id>.json` — `python -m agent.verify` תופס את זה |
+| **יומן בשרשרת** | `audit.jsonl` שבו כל שורה חותמת על קודמתה ב-HMAC. מחיקה או עריכה של שורה שוברת את כל השרשרת מאותה נקודה, ו-`iddo-harness audit verify` מצביע על השורה הראשונה שנשברה |
+| **כספת סודות** | `{{secret:openai_key}}` בתוך ה-packet; הערך מוחלף רגע לפני ההרצה ונמחק מהפלט. מפתח API כבר לא צריך לעבור דרך git ולשבת ב-`results/` לנצח |
+| **Sandbox** | `none` / `light` / `strict` לפי `kind`. ה-policy מחליט *אם* פקודה תרוץ; זה מגביל *במה היא נוגעת* אחרי שכן |
+| **זרימת אישורים** | `local` / `notification` / `remote` — מצטברים, לא חלופיים. timeout של 5 דקות במקום 30, כי prompt שמתמהמה זה prompt שמאשרים בלי לקרוא |
+| **Health endpoint** | `/health`, `/metrics`, `/audit/tail`, `/policy` — localhost בלבד, פעמיים (bind + בדיקת peer). **כבוי כברירת מחדל** |
+| **Policy linter** | `iddo-harness policy lint` — תופס `block:` ריק, דפוס שלא מתאים לכלום, וכפילויות בין `auto_allow` ל-`block`. exit codes ל-CI |
+
+**Backward compat:** `policy.yaml` בלי בלוק `security:` מתנהג בדיוק כמו v2. בלי
+מפתחות — תוצאות יוצאות בלי חתימה, עם warning אחד. ב-`amp.py` לא נגענו.
+
+**תלות חדשה (אופציונלית):** `cryptography>=42.0.0` (`pip install 'iddo-harness[security]'`).
+
+---
+
 ## v2 Highlights — Agent Fabric
 
 v2 מוסיף 11 יכולות חדשות (14 `kind`ים) מעל v1, בלי לשבור שום דבר קיים.
@@ -136,14 +158,24 @@ iddo-harness/
 │   ├── taskqueue.py         # עדיפויות, תלויות, חלונות זמן (v3)
 │   ├── metrics.py           # אוסף מדדים + /metrics ו-/health (v3)
 │   ├── ws_bridge.py         # תחבורת WebSocket מאומתת (v3)
-│   └── locks.py             # GIT_PUSH_LOCK המשותף (v3)
+│   ├── locks.py             # GIT_PUSH_LOCK המשותף (v3)
+│   ├── signing.py           # חתימת תוצאות Ed25519 (v3 Track B)
+│   ├── verify.py            # מאמת חתימות מה-CLI (v3)
+│   ├── audit.py             # יומן ביקורת בשרשרת HMAC (v3)
+│   ├── secrets_vault.py     # כספת מוצפנת + {{secret:name}} (v3)
+│   ├── sandbox.py           # none / light / strict (v3)
+│   ├── approval.py          # local / notification / remote (v3)
+│   └── health_server.py     # /health, /audit/tail, /policy (v3)
 ├── installer/               # התקנה מהירה
 │   ├── install_windows.ps1  # Windows one-liner
 │   ├── install_linux.sh     # Linux/DGX
-│   └── install_mac.sh       # macOS
+│   ├── install_mac.sh       # macOS
+│   ├── gen_keys.py          # יצירת זוג מפתחות למכונה (v3)
+│   └── policy_lint.py       # לינטר ל-policy.yaml (v3)
 ├── docs/
 │   ├── quickstart.md
 │   ├── security.md
+│   ├── security_v3.md
 │   ├── v2_spec.md
 │   ├── v3_track_a.md
 │   └── troubleshooting.md

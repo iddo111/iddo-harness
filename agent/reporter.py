@@ -26,6 +26,11 @@ try:
 except ImportError:  # installed as a package
     from agent.locks import GIT_PUSH_LOCK
 
+try:
+    from signing import Signer
+except ImportError:  # pragma: no cover - packaged imports
+    from agent.signing import Signer
+
 log = logging.getLogger("harness.reporter")
 
 # Iddo Harness's own AMP identity when acting as the outbound source/actor.
@@ -36,12 +41,16 @@ HARNESS_IDENTITY_CANONICAL = "brick:iddo-harness"
 
 
 class Reporter:
-    def __init__(self, cfg):
+    def __init__(self, cfg, signer=None):
         self.cfg = cfg
         self.repo = cfg.transport["repo"]
         self.result_dir = cfg.transport.get("result_dir", "results/")
         self._local = Path(tempfile.gettempdir()) / f"iddo-harness-bridge-{self.repo.replace('/', '_')}"
         self._instance = getattr(cfg, "owner", None) or "agent-default"
+        # Every published result is signed (docs/security_v3.md §1). An install
+        # that never ran `installer.gen_keys` has no key, and Signer then passes
+        # documents through unchanged — unsigned beats not reporting at all.
+        self.signer = signer if signer is not None else Signer.from_config(cfg)
 
     # -----------------------------------------------------------------------
     def send(self, task, result):
@@ -102,6 +111,7 @@ class Reporter:
 
     # -----------------------------------------------------------------------
     def _write(self, task, payload: dict, filename: str | None = None):
+        payload = self.signer.sign(payload, context=f"result:{task.id}")
         out_dir = self._local / self.result_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         p = out_dir / (filename or f"{task.id}.json")

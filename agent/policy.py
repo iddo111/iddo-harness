@@ -8,6 +8,11 @@ import re
 from enum import Enum
 from pathlib import Path
 
+try:
+    from secrets_vault import mask_text
+except ImportError:  # pragma: no cover - packaged imports
+    from agent.secrets_vault import mask_text
+
 log = logging.getLogger("harness.policy")
 
 # v2 kinds have no real command line, so the executors synthesise one
@@ -47,8 +52,12 @@ class Decision(Enum):
 
 
 class PolicyEngine:
-    def __init__(self, cfg):
+    def __init__(self, cfg, audit_log=None):
         self.cfg = cfg
+        # v3 Track B: when wired up, every decision also lands in the
+        # hash-chained audit log with the rule that produced it. None keeps the
+        # v1/v2 behaviour of logging to the python logger only.
+        self.audit_log = audit_log
 
     # -----------------------------------------------------------------------
     def decide(self, command: str, target_paths: list[str] | None = None) -> tuple[Decision, str]:
@@ -64,7 +73,12 @@ class PolicyEngine:
         pattern before reaching the read-path step, and a v1 write verb already
         fell through to the default CONFIRM, so no v1 decision changes.
         """
-        cmd = command.strip()
+        # Vault references are matched in their masked form: `{{secret:foo}}`
+        # becomes `<vault:foo>`, so the `*secret*` / `*token*` / `*password*`
+        # block patterns keep rejecting a credential pasted inline while a
+        # reference to the encrypted vault passes. Using the vault is the
+        # sanctioned way to pass a credential — see docs/security_v3.md §3.
+        cmd = mask_text(command.strip())
         verb = cmd.split(maxsplit=1)[0].lower() if cmd else ""
 
         # 1. blocked?
@@ -105,4 +119,23 @@ class PolicyEngine:
 
     # -----------------------------------------------------------------------
     def audit(self, task_id: str, command: str, decision: Decision, reason: str):
-        log.info(f"task={task_id} decision={decision.value} cmd={command!r} reason={reason}")
+        """Log a decision, and append it to the audit chain when one is wired up.
+
+        ``command`` is masked before it goes anywhere: this is the exact line a
+        human reads later, which makes it the last place a credential should
+        appear.
+        """
+        safe = mask_text(command)
+        log.info(f"task={task_id} decision={decision.value} cmd={safe!r} reason={reason}")
+        if self.audit_log is None:
+            return
+        try:
+            self.audit_log.record(
+                actor=str(task_id),
+                action=f"policy_decision:{decision.value}",
+                resource=safe,
+                outcome="deny" if decision is Decision.BLOCK else "ok",
+                meta={"rule": reason, "decision": decision.value},
+            )
+        except Exception:  # pragma: no cover - auditing must not block a task
+            log.exception("audit sink failed while recording a policy decision")
