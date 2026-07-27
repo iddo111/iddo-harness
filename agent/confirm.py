@@ -35,6 +35,16 @@ LOCAL_PENDING_DIR = Path.home() / ".iddo-harness" / "pending"
 DEFAULT_TIMEOUT_MINUTES = 30
 
 
+def local_pending_dir() -> Path:
+    """The pending-confirmation directory under the *current* home.
+
+    Resolved on each call rather than read from :data:`LOCAL_PENDING_DIR`,
+    which freezes ``Path.home()`` at import time and so keeps pointing at the
+    real home even after a caller (or a test) has redirected it.
+    """
+    return Path.home() / ".iddo-harness" / "pending"
+
+
 @dataclass
 class PendingConfirmation:
     task_id: str
@@ -64,7 +74,7 @@ class ConfirmManager:
 
     def __init__(self, cfg=None, local_dir: Optional[Path] = None):
         self.cfg = cfg
-        self.local_dir = Path(local_dir) if local_dir else LOCAL_PENDING_DIR
+        self.local_dir = Path(local_dir) if local_dir else local_pending_dir()
         self.local_dir.mkdir(parents=True, exist_ok=True)
 
         self.timeout_minutes = DEFAULT_TIMEOUT_MINUTES
