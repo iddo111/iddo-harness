@@ -24,6 +24,8 @@ try:
     from llm_router import LlmRouter
     from llm_loop import LlmDrivenLoop, DEFAULT_MAX_ITERATIONS
     from executor import Executor
+    from audit import AuditLog
+    from secrets_vault import SecretVault, VaultError
 except ImportError:  # pragma: no cover - fallback when installed as a package
     from agent.config import load_config
     from agent.confirm import ConfirmManager
@@ -31,6 +33,8 @@ except ImportError:  # pragma: no cover - fallback when installed as a package
     from agent.llm_router import LlmRouter
     from agent.llm_loop import LlmDrivenLoop, DEFAULT_MAX_ITERATIONS
     from agent.executor import Executor
+    from agent.audit import AuditLog
+    from agent.secrets_vault import SecretVault, VaultError
 
 log = logging.getLogger("harness.cli")
 
@@ -266,10 +270,22 @@ def confirm(ctx, task_id, decision):
         raise click.UsageError("Specify --approve or --deny")
 
     cfg = load_config(ctx.obj.get("config_path"))
-    confirm_manager = ConfirmManager(cfg)
-
     approve = decision == "approve"
-    path = confirm_manager.respond(task_id, approve=approve)
+
+    # ApprovalManager so the decision lands in the tamper-evident audit chain
+    # with who made it. It falls back to plain ConfirmManager behaviour when the
+    # audit log cannot be opened, so approving never depends on auditing.
+    try:
+        try:
+            from approval import ApprovalManager
+        except ImportError:
+            from agent.approval import ApprovalManager
+        manager = ApprovalManager(cfg, audit_log=AuditLog.from_config(cfg))
+        path = manager.respond(task_id, approve=approve, actor="user")
+    except Exception as e:
+        log.warning(f"approval manager unavailable ({e}) — using the plain confirm queue")
+        path = ConfirmManager(cfg).respond(task_id, approve=approve)
+
     verb = "approved" if approve else "denied"
     click.echo(f"Task {task_id} {verb}. Written to {path}")
 
@@ -315,6 +331,132 @@ def policy_check(ctx, command, paths):
     decision, reason = engine.decide(command, list(paths))
     click.echo(f"Decision: {decision.value}")
     click.echo(f"Reason:   {reason}")
+
+
+@policy_group.command(name="lint")
+@click.argument("path", required=False, type=click.Path())
+@click.option("--strict", is_flag=True, help="Treat warnings as errors.")
+@click.pass_context
+def policy_lint_cmd(ctx, path, strict):
+    """Lint policy.yaml for empty block lists, bad patterns and contradictions."""
+    try:
+        from installer.policy_lint import main as lint_main
+    except ImportError as e:  # pragma: no cover - installer/ ships with the repo
+        raise click.ClickException(f"policy linter unavailable: {e}")
+
+    argv = [path or ctx.obj.get("config_path") or ""]
+    argv = [a for a in argv if a]
+    if strict:
+        argv.append("--strict")
+    ctx.exit(lint_main(argv))
+
+
+# ---------------------------------------------------------------------------
+@cli.group(name="secret")
+def secret_group():
+    """Encrypted secrets vault. Reference values as {{secret:name}} in a task."""
+
+
+@secret_group.command(name="set")
+@click.argument("name")
+@click.option(
+    "--stdin", "from_stdin", is_flag=True,
+    help="Read the value from stdin instead of prompting (for scripts and pipes).",
+)
+@click.pass_context
+def secret_set(ctx, name, from_stdin):
+    """Store a secret. The value is never taken from the command line.
+
+    Passing a credential as an argument would put it in the shell history, in
+    `ps` output, and in this process's argv — so it is read from a hidden prompt
+    or from stdin instead.
+    """
+    cfg = load_config(ctx.obj.get("config_path"))
+    if from_stdin:
+        value = sys.stdin.read().rstrip("\n")
+    else:
+        value = click.prompt(f"Value for {name}", hide_input=True, confirmation_prompt=True)
+    if not value:
+        raise click.ClickException("refusing to store an empty secret")
+
+    try:
+        vault = SecretVault.from_config(cfg, audit_sink=AuditLog.from_config(cfg))
+        vault.set(name, value)
+    except VaultError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"Stored secret {name!r}. Use it as {{{{secret:{name}}}}} in a task payload.")
+
+
+@secret_group.command(name="list")
+@click.pass_context
+def secret_list(ctx):
+    """List secret names. Values are never printed."""
+    cfg = load_config(ctx.obj.get("config_path"))
+    try:
+        vault = SecretVault.from_config(cfg)
+        names = vault.names()
+    except VaultError as e:
+        raise click.ClickException(str(e))
+    if not names:
+        click.echo("Vault is empty.")
+        return
+    for n in names:
+        click.echo(n)
+
+
+@secret_group.command(name="rm")
+@click.argument("name")
+@click.pass_context
+def secret_rm(ctx, name):
+    """Delete a secret from the vault."""
+    cfg = load_config(ctx.obj.get("config_path"))
+    try:
+        vault = SecretVault.from_config(cfg, audit_sink=AuditLog.from_config(cfg))
+        removed = vault.delete(name)
+    except VaultError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"Deleted {name!r}." if removed else f"No such secret: {name!r}")
+
+
+# ---------------------------------------------------------------------------
+@cli.group(name="audit")
+def audit_group():
+    """The hash-chained audit log (~/.iddo-harness/audit.jsonl)."""
+
+
+@audit_group.command(name="tail")
+@click.option("-n", "--lines", default=20, type=int, help="Number of records to show.")
+@click.option("--json", "as_json", is_flag=True, help="Print raw JSON lines.")
+@click.pass_context
+def audit_tail(ctx, lines, as_json):
+    """Show the last N audit records."""
+    cfg = load_config(ctx.obj.get("config_path"))
+    records = AuditLog.from_config(cfg).tail(lines)
+    if not records:
+        click.echo("No audit records yet.")
+        return
+    for rec in records:
+        if as_json:
+            click.echo(json.dumps(rec, ensure_ascii=False))
+        else:
+            click.echo(
+                f"{rec.get('ts', '?')}  {rec.get('outcome', '?'):<5} "
+                f"{rec.get('actor', '?')}  {rec.get('action', '?')}  {rec.get('resource', '')}"
+            )
+
+
+@audit_group.command(name="verify")
+@click.pass_context
+def audit_verify(ctx):
+    """Verify the HMAC chain. Reports the first line that does not match."""
+    cfg = load_config(ctx.obj.get("config_path"))
+    audit_log = AuditLog.from_config(cfg)
+    ok, line_no, detail = audit_log.verify_chain()
+    if ok:
+        click.echo(f"Audit chain intact: {audit_log.path}")
+        return
+    click.echo(f"Audit chain BROKEN at line {line_no}: {detail}")
+    ctx.exit(1)
 
 
 if __name__ == "__main__":
