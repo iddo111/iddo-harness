@@ -39,6 +39,11 @@ from typing import Any
 
 import amp
 
+try:
+    from signing import Signer
+except ImportError:  # pragma: no cover - packaged imports
+    from agent.signing import Signer
+
 log = logging.getLogger("harness.reporter_v2")
 
 # Same identity constants as v1's reporter — the harness is one AMP brick
@@ -65,6 +70,7 @@ class ReporterV2:
         batch_interval_ms: int = DEFAULT_BATCH_INTERVAL_MS,
         git_push: bool = True,
         local_dir: Path | None = None,
+        signer: Any | None = None,
     ) -> None:
         self.cfg = cfg
         self.repo = cfg.transport["repo"]
@@ -76,6 +82,10 @@ class ReporterV2:
             Path(tempfile.gettempdir()) / f"iddo-harness-bridge-{self.repo.replace('/', '_')}"
         )
         self._instance = getattr(cfg, "owner", None) or "agent-default"
+        # Each chunk is signed independently: a consumer acts on chunk 7 long
+        # before the final chunk exists, so a per-task signature would arrive
+        # too late to be worth anything (docs/security_v3.md §1).
+        self.signer = signer if signer is not None else Signer.from_config(cfg)
         self._lock = threading.Lock()
         self._pending: list[Path] = []
         self._last_flush = time.time()
@@ -91,7 +101,7 @@ class ReporterV2:
         a caller forgets them.
         """
         body = {**chunk_body, "task_id": task.id, "seq": seq, "is_final": is_final}
-        payload = self._wrap(task, body)
+        payload = self.signer.sign(self._wrap(task, body), context=f"chunk:{task.id}#{seq}")
         path = self._chunk_path(task.id, seq)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
