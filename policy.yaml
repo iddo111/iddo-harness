@@ -159,6 +159,63 @@ paths:
   results:   "~/.iddo-harness/results/"
 
 # ---------------------------------------------------------------------------
+# v3 Track B — Security (docs/security_v3.md)
+# ---------------------------------------------------------------------------
+security:
+  # חתימת תוצאות (Ed25519). המפתחות נוצרים ע"י `python -m installer.gen_keys`.
+  # אם אין מפתח — התוצאות יוצאות בלי חתימה, עם warning אחד בלוג.
+  signing:
+    enabled: true
+    # private_key_path: ~/.iddo-harness/agent.key
+    # public_key_path:  ~/.iddo-harness/agent.pub
+
+  # כספת סודות מוצפנת. בתוך task packet: "{{secret:openai_key}}".
+  # הערך מוחלף רגע לפני ההרצה ואף פעם לא נכתב ללוג / ל-results.
+  secrets:
+    # store_path: ~/.iddo-harness/secrets.enc
+    # key_path:   ~/.iddo-harness/agent.key
+
+  # יומן ביקורת בשרשרת HMAC — כל שורה חותמת על קודמתה.
+  audit:
+    # path:     ~/.iddo-harness/audit.jsonl
+    # key_path: ~/.iddo-harness/audit.key
+    rotate_daily: true
+
+# ---------------------------------------------------------------------------
+# Sandbox — הגבלת מה שפקודה יכולה לגעת בו (לא *אם* היא תרוץ; זה תפקיד ה-policy)
+#
+#   none    — כמו היום, בלי עטיפה. ברירת המחדל, כדי לא לשנות התנהגות קיימת.
+#   light   — /tmp פרטי.
+#   strict  — בלי רשת, וקריאה-בלבד מחוץ ל-cwd של המשימה.
+#
+# Linux דורש firejail. Windows דורש pywin32. בלעדיהם — warning והרצה רגילה.
+# ---------------------------------------------------------------------------
+sandbox:
+  enabled: true
+  default: none
+  per_kind:
+    # shell_stream: light
+    # shell_session_open: light
+
+# ---------------------------------------------------------------------------
+# שרת health/audit מקומי (agent/health_server.py). localhost בלבד.
+# ---------------------------------------------------------------------------
+health:
+  enabled: false
+  host: 127.0.0.1
+  port: 8478
+
+# ---------------------------------------------------------------------------
+# זרימת אישורים (agent/approval.py)
+#   local        — קבצים ב-~/.iddo-harness/pending (v1, ברירת מחדל)
+#   notification — + התראה לדסקטופ (notify-send / toast / osascript)
+#   remote       — + שליחה דרך WS bridge של Track A, אם הוא פועל
+# ---------------------------------------------------------------------------
+approval:
+  mode: local
+  timeout_seconds: 300
+
+# ---------------------------------------------------------------------------
 # תעלת התקשורת
 # ---------------------------------------------------------------------------
 transport:

@@ -26,6 +26,13 @@ class Config:
     paths: dict = field(default_factory=dict)
     transport: dict = field(default_factory=dict)
     confirm: dict = field(default_factory=dict)
+    # v3 Track B (docs/security_v3.md). All four default to {} so a pre-v3
+    # policy.yaml loads unchanged and every consumer falls back to its own
+    # built-in defaults.
+    security: dict = field(default_factory=dict)
+    sandbox: dict = field(default_factory=dict)
+    health: dict = field(default_factory=dict)
+    approval: dict = field(default_factory=dict)
 
 
 def _default_owner() -> str:
@@ -60,6 +67,10 @@ def load_config(path: str | None = None) -> Config:
                 paths=data.get("paths", {}),
                 transport=data.get("transport", {}),
                 confirm=data.get("confirm", {"timeout_minutes": 30}),
+                security=data.get("security") or {},
+                sandbox=data.get("sandbox") or {},
+                health=data.get("health") or {},
+                approval=data.get("approval") or {},
             )
 
     raise FileNotFoundError(f"No policy.yaml found in {candidate_paths}")

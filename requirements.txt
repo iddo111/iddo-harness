@@ -4,3 +4,8 @@ httpx>=0.27
 pytest>=7
 watchdog>=4.0.0
 psutil>=5.9.0
+# v3 Track B: Ed25519 result signing (agent/signing.py) and the Fernet-encrypted
+# secrets vault (agent/secrets_vault.py). Without it the harness still runs —
+# results go out unsigned, and a task referencing {{secret:...}} fails loudly
+# instead of leaking a placeholder to a remote endpoint.
+cryptography>=42.0.0

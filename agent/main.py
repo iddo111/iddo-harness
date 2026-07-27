@@ -25,6 +25,16 @@ try:
     from confirm import ConfirmManager
 except ImportError:  # pragma: no cover
     from agent.confirm import ConfirmManager
+try:
+    from approval import ApprovalManager
+    from audit import AuditLog
+    from health_server import HealthServer
+    from secrets_vault import SecretVault
+except ImportError:  # pragma: no cover
+    from agent.approval import ApprovalManager
+    from agent.audit import AuditLog
+    from agent.health_server import HealthServer
+    from agent.secrets_vault import SecretVault
 
 LOCK_PATH = Path.home() / ".iddo-harness" / "agent.lock"
 
@@ -69,11 +79,32 @@ def main():
     log.info("=" * 60)
 
     cfg = load_config(args.config)
-    policy = PolicyEngine(cfg)
-    confirm_manager = ConfirmManager(cfg)
-    executor = Executor(policy, confirm_manager)
+
+    # v3 Track B. Each of these degrades to the v1/v2 behaviour on its own:
+    # no audit key yet → the log generates one; no agent.key → the vault only
+    # complains when a task actually references {{secret:...}}; health.enabled
+    # false → no socket is opened at all.
+    audit_log = AuditLog.from_config(cfg)
+    vault = SecretVault.from_config(cfg, audit_sink=audit_log)
+    policy = PolicyEngine(cfg, audit_log=audit_log)
+    confirm_manager = ApprovalManager(cfg, audit_log=audit_log)
+    executor = Executor(policy, confirm_manager, vault=vault, audit_log=audit_log)
     reporter = Reporter(cfg)
     poller = GithubPoller(cfg)
+
+    audit_log.record(
+        actor="harness", action="agent_startup", resource=cfg.transport.get("repo", ""),
+        meta={"pid": os.getpid(), "approval_mode": confirm_manager.mode, "once": bool(args.once)},
+    )
+
+    health: HealthServer | None = None
+    if HealthServer.enabled_in(cfg):
+        try:
+            health = HealthServer.from_config(cfg, audit_log=audit_log)
+            health.start()
+        except Exception:
+            log.exception("health endpoint failed to start — continuing without it")
+            health = None
 
     log.info(f"Polling {cfg.transport['repo']} every {cfg.polling['interval_seconds']}s")
 
@@ -112,10 +143,19 @@ def main():
             time.sleep(cfg.polling["interval_seconds"])
     except KeyboardInterrupt:
         log.info("Stopped by user")
-    except Exception:
+        audit_log.record(actor="user", action="agent_shutdown", resource="keyboard_interrupt")
+    except Exception as e:
         log.exception("Fatal error in main loop")
+        audit_log.record(
+            actor="harness", action="agent_shutdown", resource="fatal_error",
+            outcome="error", meta={"error": str(e)},
+        )
         raise
+    else:
+        audit_log.record(actor="harness", action="agent_shutdown", resource="clean_exit")
     finally:
+        if health is not None:
+            health.stop()
         _remove_lock()
 
 
