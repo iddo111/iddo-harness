@@ -137,9 +137,11 @@ def test_clear_with_no_namespace_drops_everything(store: MemoryStore) -> None:
 # TTL
 # ---------------------------------------------------------------------------
 def test_ttl_hides_the_entry_once_it_lapses(store: MemoryStore) -> None:
-    store.set("temp", "v", ttl_seconds=0.05)
+    # A 50ms TTL races the assertion below on a loaded machine: the row can
+    # lapse before the read that is supposed to still see it.
+    store.set("temp", "v", ttl_seconds=0.5)
     assert store.get("temp") == "v"
-    time.sleep(0.08)
+    time.sleep(0.7)
     assert store.get("temp") is None
 
 
@@ -171,9 +173,9 @@ def test_non_positive_ttl_is_rejected(store: MemoryStore) -> None:
 
 
 def test_exists_ignores_expired_entries(store: MemoryStore) -> None:
-    store.set("k", "v", ttl_seconds=0.05)
+    store.set("k", "v", ttl_seconds=0.5)
     assert store.exists("k") is True
-    time.sleep(0.08)
+    time.sleep(0.7)
     assert store.exists("k") is False
 
 
@@ -223,9 +225,9 @@ def test_list_respects_the_limit(store: MemoryStore) -> None:
 
 def test_count_matches_the_live_rows(store: MemoryStore) -> None:
     store.set("a", 1)
-    store.set("b", 2, ttl_seconds=0.05)
+    store.set("b", 2, ttl_seconds=0.5)
     assert store.count() == 2
-    time.sleep(0.08)
+    time.sleep(0.7)
     assert store.count() == 1
 
 
