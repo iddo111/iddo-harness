@@ -94,6 +94,36 @@ def cli(ctx, verbose, config):
 
 
 # ---------------------------------------------------------------------------
+@cli.group()
+def mcp():
+    """Install and manage MCP host integrations."""
+
+
+@mcp.command("install")
+@click.option("--host", type=click.Choice(["claude-desktop"]), required=True)
+@click.option("--dry-run", is_flag=True, help="Print the resulting config without writing it.")
+@click.option("--runtime-config", type=click.Path(), default=None)
+@click.pass_context
+def mcp_install(ctx, host, dry_run, runtime_config):
+    """Register the local stdio adapter with an MCP host."""
+    try:
+        from installer.claude_desktop import install
+    except ImportError as exc:  # pragma: no cover
+        raise click.ClickException(f"Claude Desktop installer unavailable: {exc}") from exc
+    try:
+        path, rendered = install(
+            dry_run=dry_run, policy_path=ctx.obj.get("config_path"),
+            runtime_path=runtime_config,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if dry_run:
+        click.echo(f"Dry run; would write {path}:\n{rendered}", nl=False)
+    else:
+        click.echo(f"Installed Iddo Harness MCP server in {path}")
+
+
+# ---------------------------------------------------------------------------
 @cli.command()
 @click.option("--once", is_flag=True, help="Run a single polling cycle and exit.")
 @click.pass_context

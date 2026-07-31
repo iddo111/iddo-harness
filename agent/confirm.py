@@ -55,6 +55,9 @@ class PendingConfirmation:
     payload: dict = field(default_factory=dict)
     message: str = ""
     status: str = "pending"  # pending | approved | denied | timed_out
+    authenticated_agent_id: str = ""
+    transport: str = ""
+    client_id: str = ""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, ensure_ascii=False)
@@ -118,6 +121,9 @@ class ConfirmManager:
             created_ts=time.time(),
             kind=getattr(task, "kind", "shell"),
             payload=dict(task.payload) if isinstance(task.payload, dict) else {},
+            authenticated_agent_id=getattr(task, "authenticated_agent_id", ""),
+            transport=getattr(task, "transport", ""),
+            client_id=getattr(task, "client_id", ""),
         )
         pc.message = _one_liner(pc.task_id, command)
 

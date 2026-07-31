@@ -5,6 +5,8 @@ import fnmatch
 import logging
 import os
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from enum import Enum
 from pathlib import Path
 
@@ -58,9 +60,51 @@ class PolicyEngine:
         # hash-chained audit log with the rule that produced it. None keeps the
         # v1/v2 behaviour of logging to the python logger only.
         self.audit_log = audit_log
+        self._identity_context: ContextVar[dict] = ContextVar(
+            "harness_policy_identity", default={"agent_id": "legacy", "transport": "unknown", "client_id": ""}
+        )
+
+    def _agent_profile(self, agent_id: str | None = None) -> dict:
+        identity = agent_id or self._identity_context.get().get("agent_id", "legacy")
+        agents = getattr(self.cfg, "agents", None) or {}
+        profiles = agents.get("profiles", agents) if isinstance(agents, dict) else {}
+        profile = profiles.get(identity, {}) if isinstance(profiles, dict) else {}
+        return profile if isinstance(profile, dict) else {}
+
+    @contextmanager
+    def bind_task(self, task):
+        try:
+            from agent_identity import authenticated_agent_id
+        except ImportError:  # pragma: no cover - packaged imports
+            from agent.agent_identity import authenticated_agent_id
+        value = {
+            "agent_id": authenticated_agent_id(task),
+            "transport": getattr(task, "transport", "unknown"),
+            "client_id": getattr(task, "client_id", ""),
+        }
+        token = self._identity_context.set(value)
+        try:
+            yield value
+        finally:
+            self._identity_context.reset(token)
+
+    def authorize_kind(self, kind: str, agent_id: str | None = None) -> tuple[Decision, str]:
+        profile = self._agent_profile(agent_id)
+        allowed = profile.get("allowed_kinds")
+        if not allowed:
+            return Decision.AUTO, "no per-agent kind restriction"
+        if any(fnmatch.fnmatchcase(kind, str(pattern)) for pattern in allowed):
+            return Decision.AUTO, f"agent kind allowed: {kind}"
+        return Decision.BLOCK, f"agent is not allowed to run kind: {kind}"
 
     # -----------------------------------------------------------------------
-    def decide(self, command: str, target_paths: list[str] | None = None) -> tuple[Decision, str]:
+    def decide(
+        self,
+        command: str,
+        target_paths: list[str] | None = None,
+        *,
+        agent_id: str | None = None,
+    ) -> tuple[Decision, str]:
         """
         Returns (decision, reason).
 
@@ -80,6 +124,16 @@ class PolicyEngine:
         # sanctioned way to pass a credential — see docs/security_v3.md §3.
         cmd = mask_text(command.strip())
         verb = cmd.split(maxsplit=1)[0].lower() if cmd else ""
+        profile = self._agent_profile(agent_id)
+
+        agent_block = profile.get("block") or {}
+        for pat in agent_block.get("commands", []):
+            if fnmatch.fnmatchcase(cmd, pat):
+                return Decision.BLOCK, f"agent blocked by pattern: {pat}"
+        for path in target_paths or []:
+            for pat in agent_block.get("paths", {}).get("absolute_no_touch", []):
+                if _path_matches(path, pat):
+                    return Decision.BLOCK, f"agent path blocked: {pat}"
 
         # 1. blocked?
         for pat in self.cfg.block.get("commands", []):
@@ -90,6 +144,21 @@ class PolicyEngine:
             for pat in self.cfg.block.get("paths", {}).get("absolute_no_touch", []):
                 if fnmatch.fnmatchcase(path, pat):
                     return Decision.BLOCK, f"path blocked: {pat}"
+
+        agent_confirm = profile.get("require_confirm") or {}
+        for pat in agent_confirm.get("commands", []):
+            if fnmatch.fnmatchcase(cmd, pat):
+                return Decision.CONFIRM, f"agent requires confirmation: {pat}"
+
+        agent_auto = profile.get("auto_allow") or {}
+        if profile.get("override_global_confirm", False):
+            for pat in agent_auto.get("commands", []):
+                if fnmatch.fnmatchcase(cmd, pat):
+                    roots = agent_auto.get("paths", {}).get("write", [])
+                    if verb in WRITE_VERBS and target_paths and roots:
+                        if not all(any(_path_matches(path, root) for root in roots) for path in target_paths):
+                            return Decision.CONFIRM, "agent write target is outside autonomous roots"
+                    return Decision.AUTO, f"agent auto-allowed: {pat}"
 
         # 2. requires confirm?
         for pat in self.cfg.require_confirm.get("commands", []):
@@ -107,6 +176,10 @@ class PolicyEngine:
         for pat in self.cfg.auto_allow.get("commands", []):
             if fnmatch.fnmatchcase(cmd, pat):
                 return Decision.AUTO, f"auto-allowed: {pat}"
+
+        for pat in agent_auto.get("commands", []):
+            if fnmatch.fnmatchcase(cmd, pat):
+                return Decision.AUTO, f"agent auto-allowed: {pat}"
 
         # 5. read verb, and every target path sits inside an allowed read root?
         read_roots = self.cfg.auto_allow.get("paths", {}).get("read", [])
@@ -126,16 +199,27 @@ class PolicyEngine:
         appear.
         """
         safe = mask_text(command)
-        log.info(f"task={task_id} decision={decision.value} cmd={safe!r} reason={reason}")
+        identity = self._identity_context.get()
+        log.info(
+            f"task={task_id} agent={identity.get('agent_id')} transport={identity.get('transport')} "
+            f"decision={decision.value} cmd={safe!r} reason={reason}"
+        )
         if self.audit_log is None:
             return
         try:
             self.audit_log.record(
-                actor=str(task_id),
+                actor=str(identity.get("agent_id") or task_id),
                 action=f"policy_decision:{decision.value}",
                 resource=safe,
                 outcome="deny" if decision is Decision.BLOCK else "ok",
-                meta={"rule": reason, "decision": decision.value},
+                meta={
+                    "rule": reason,
+                    "decision": decision.value,
+                    "task_id": str(task_id),
+                    "agent_id": identity.get("agent_id", "legacy"),
+                    "transport": identity.get("transport", "unknown"),
+                    "client_id": identity.get("client_id", ""),
+                },
             )
         except Exception:  # pragma: no cover - auditing must not block a task
             log.exception("audit sink failed while recording a policy decision")

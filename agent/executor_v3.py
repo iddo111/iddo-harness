@@ -41,6 +41,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 try:
+    from agent_identity import bind_authenticated_identity
+except ImportError:  # pragma: no cover - packaged imports
+    from agent.agent_identity import bind_authenticated_identity
+
+try:
     from executor import Result
 except ImportError:  # pragma: no cover - packaged import
     from agent.executor import Result  # type: ignore[no-redef]
@@ -321,6 +326,13 @@ class ExecutorV3:
         task = build_subtask(
             {**schedule.task, "id": f"{schedule.id}-run-{schedule.run_count + 1}"},
         )
+        if getattr(schedule, "agent_id", "legacy") != "legacy":
+            bind_authenticated_identity(
+                task,
+                schedule.agent_id,
+                transport=getattr(schedule, "transport", "scheduled"),
+                client_id=getattr(schedule, "client_id", ""),
+            )
         return self._execute_child(task)
 
     # -- 1/2. sub-tasks -----------------------------------------------------
@@ -453,6 +465,9 @@ class ExecutorV3:
 
     def _schedule_task(self, task: Any, decision: str = "auto") -> Result:
         schedule = parse_schedule(task.payload or {})
+        schedule.agent_id = getattr(task, "authenticated_agent_id", "") or "legacy"
+        schedule.transport = getattr(task, "transport", "internal")
+        schedule.client_id = getattr(task, "client_id", "")
         self.scheduler.add(schedule)
         return self._finish(task, decision, True, {"schedule": schedule.to_dict()})
 

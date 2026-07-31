@@ -18,7 +18,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import amp
+try:
+    import amp
+except ImportError:  # pragma: no cover - installed package imports
+    from agent import amp
 
 try:
     from locks import GIT_PUSH_LOCK
@@ -42,6 +45,11 @@ class Task:
     # TODO(amp): once every producer (Perplexity/Claude/GPT/Gemini) speaks
     # AMP exclusively, `envelope` can become required instead of optional.
     envelope: "amp.AmpEnvelope | None" = None
+    # Set only by an authenticated transport. The AMP body's claimed
+    # ``agent_id`` is producer-controlled and is never trusted for policy.
+    authenticated_agent_id: str = ""
+    transport: str = "git"
+    client_id: str = ""
 
 
 def task_from_packet(data: dict, source_path: Path | None = None) -> "Task":
@@ -202,6 +210,9 @@ class GithubPoller:
                 id=data.get("task_id", task_id),
                 kind=data.get("kind", "shell"),
                 payload=data.get("payload", {}),
+                authenticated_agent_id=data.get("authenticated_agent_id", ""),
+                transport=data.get("transport", "git"),
+                client_id=data.get("client_id", ""),
             )
             approved = status == "approved"
             log.info(f"scan_pending: task={task.id} resolved as {status}")

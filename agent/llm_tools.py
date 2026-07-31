@@ -212,6 +212,9 @@ class ExecutorTaskView:
     id: str
     kind: str
     payload: dict
+    authenticated_agent_id: str = ""
+    transport: str = "internal"
+    client_id: str = ""
 
 
 def envelope_to_executor_task(env: AmpEnvelope) -> ExecutorTaskView:

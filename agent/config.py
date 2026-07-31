@@ -58,6 +58,7 @@ class Config:
     sandbox: dict = field(default_factory=dict)
     health: dict = field(default_factory=dict)
     approval: dict = field(default_factory=dict)
+    agents: dict = field(default_factory=dict)
 
 
 def _default_owner() -> str:
@@ -96,6 +97,7 @@ def load_config(path: str | None = None) -> Config:
                 sandbox=data.get("sandbox") or {},
                 health=data.get("health") or {},
                 approval=data.get("approval") or {},
+                agents=data.get("agents") or {},
             )
 
     raise FileNotFoundError(f"No policy.yaml found in {candidate_paths}")
@@ -119,6 +121,26 @@ class WsConfig:
     port: int = 8477
     token: str | None = None
     token_path: Path = field(default_factory=lambda: WS_TOKEN_PATH)
+
+
+DEFAULT_MCP_TOOLS = [
+    "shell.run", "shell.stream", "fs.read", "fs.write", "fs.list",
+    "fs.grep", "fs.glob", "process.list", "process.kill", "handshake",
+]
+
+
+@dataclass
+class McpConfig:
+    """MCP adapter settings. SSE is deliberately localhost-only."""
+
+    enabled: bool = False
+    transport: str = "stdio"
+    sse_bind: str = "127.0.0.1"
+    sse_port: int = 8478
+    bearer_token_env: str = "HARNESS_MCP_TOKEN"
+    # This identity is chosen by the local operator, never by an MCP request.
+    agent_id: str = "claude"
+    allowed_tools: list[str] = field(default_factory=lambda: list(DEFAULT_MCP_TOOLS))
 
 
 @dataclass
@@ -145,6 +167,7 @@ class RuntimeConfig:
     chunk_flush_ms: int = 500
     chunk_max_bytes: int = 16384
     ws: WsConfig = field(default_factory=WsConfig)
+    mcp: McpConfig = field(default_factory=McpConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
     source_path: Path | None = None
@@ -182,6 +205,14 @@ def _as_float(raw: Any, where: str, *, minimum: float | None = None) -> float:
     return value
 
 
+def _as_agent_id(raw: Any, where: str) -> str:
+    import re
+    value = str(raw).strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", value):
+        raise ConfigError(f"{where}: invalid agent id")
+    return value
+
+
 # ENV var -> (dotted config path, coercion callable).
 ENV_OVERRIDES: dict[str, tuple[str, Callable[[Any, str], Any]]] = {
     "IDDO_POLL_INTERVAL_SECONDS": ("poll_interval_seconds", lambda r, w: _as_float(r, w, minimum=0.0)),
@@ -192,6 +223,7 @@ ENV_OVERRIDES: dict[str, tuple[str, Callable[[Any, str], Any]]] = {
     "IDDO_WS_HOST": ("ws.host", lambda r, w: str(r)),
     "IDDO_WS_PORT": ("ws.port", lambda r, w: _as_int(r, w, minimum=1)),
     "IDDO_WS_TOKEN": ("ws.token", lambda r, w: str(r)),
+    "HARNESS_MCP_AGENT_ID": ("mcp.agent_id", _as_agent_id),
     "IDDO_RETRY_MAX_ATTEMPTS": ("retry.default_max_attempts", lambda r, w: _as_int(r, w, minimum=1)),
     "IDDO_METRICS_ENABLED": ("metrics.enabled", _as_bool),
 }
@@ -270,6 +302,34 @@ def load_runtime_config(
         cfg.ws.token = str(ws["token"])
     if ws.get("token_path"):
         cfg.ws.token_path = Path(str(ws["token_path"])).expanduser()
+
+    mcp = data.get("mcp") or {}
+    if not isinstance(mcp, dict):
+        raise ConfigError("mcp: expected a mapping")
+    if "enabled" in mcp:
+        cfg.mcp.enabled = _as_bool(mcp["enabled"], "mcp.enabled")
+    if "transport" in mcp:
+        cfg.mcp.transport = str(mcp["transport"]).strip().lower()
+        if cfg.mcp.transport not in {"stdio", "sse"}:
+            raise ConfigError("mcp.transport: expected 'stdio' or 'sse'")
+    if "sse_bind" in mcp:
+        cfg.mcp.sse_bind = str(mcp["sse_bind"]).strip()
+    if "sse_port" in mcp:
+        cfg.mcp.sse_port = _as_int(mcp["sse_port"], "mcp.sse_port", minimum=1)
+    if "bearer_token_env" in mcp:
+        cfg.mcp.bearer_token_env = str(mcp["bearer_token_env"]).strip()
+        if not cfg.mcp.bearer_token_env:
+            raise ConfigError("mcp.bearer_token_env: must not be empty")
+    if "agent_id" in mcp:
+        cfg.mcp.agent_id = _as_agent_id(mcp["agent_id"], "mcp.agent_id")
+    if "allowed_tools" in mcp:
+        raw_tools = mcp["allowed_tools"]
+        if not isinstance(raw_tools, list) or not all(isinstance(x, str) for x in raw_tools):
+            raise ConfigError("mcp.allowed_tools: expected a list of tool names")
+        unknown = set(raw_tools) - set(DEFAULT_MCP_TOOLS)
+        if unknown:
+            raise ConfigError(f"mcp.allowed_tools: unknown tools: {sorted(unknown)}")
+        cfg.mcp.allowed_tools = list(dict.fromkeys(raw_tools))
 
     retry = data.get("retry") or {}
     if not isinstance(retry, dict):
