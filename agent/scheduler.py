@@ -205,6 +205,9 @@ class Schedule:
     last_run_at: float | None = None
     next_run_at: float | None = None
     last_error: str = ""
+    agent_id: str = "legacy"
+    transport: str = "internal"
+    client_id: str = ""
 
     @property
     def exhausted(self) -> bool:
@@ -228,6 +231,9 @@ class Schedule:
             "last_run_at": self.last_run_at,
             "next_run_at": self.next_run_at,
             "last_error": self.last_error,
+            "agent_id": self.agent_id,
+            "transport": self.transport,
+            "client_id": self.client_id,
             "exhausted": self.exhausted,
         }
 

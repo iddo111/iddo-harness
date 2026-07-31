@@ -3,7 +3,54 @@
 
 version: 1
 owner: iddo111
-last_updated: 2026-07-23
+last_updated: 2026-08-01
+
+# Authenticated per-agent profiles. A producer-controlled AMP field is not
+# authentication: transports bind the verified identity separately before the
+# task reaches Executor.run(). Unknown/legacy callers keep the global policy.
+agents:
+  profiles:
+    perplexity:
+      allowed_kinds: ["*"]
+      # Perplexity may perform normal project work without stopping on the
+      # global write/commit confirmation rules, but only inside these roots.
+      # Global block rules always win, and the explicit confirms below win
+      # before this override is considered.
+      override_global_confirm: true
+      auto_allow:
+        commands:
+          - "write *"
+          - "patch *"
+          - "git add*"
+          - "git commit*"
+          - "git worktree*"
+          - "pytest*"
+          - "python -m pytest*"
+          - "python -m compileall*"
+          - "npm test*"
+          - "npm run build*"
+        paths:
+          write:
+            - "D:\\CLAUDE\\**"
+            - "C:\\Users\\%USERNAME%\\.codex\\worktrees\\**"
+            - "C:\\Users\\%USERNAME%\\Documents\\**"
+            - "~/.iddo-harness/memory/**"
+      require_confirm:
+        commands:
+          - "process_kill*"
+          - "git push*"
+          - "git merge*"
+          - "git rebase*"
+          - "git reset*"
+          - "pip install*"
+          - "npm install*"
+          - "apt install*"
+          - "systemctl start*"
+          - "systemctl stop*"
+          - "shutdown*"
+          - "reboot*"
+          - "schedule *"
+          - "schedule_cancel *"
 
 # ---------------------------------------------------------------------------
 # רמות אישור

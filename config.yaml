@@ -20,6 +20,26 @@ ws:
   host: 127.0.0.1
   port: 8477
 
+mcp:
+  enabled: false
+  transport: stdio
+  sse_bind: 127.0.0.1
+  sse_port: 8478
+  bearer_token_env: HARNESS_MCP_TOKEN
+  # Static authenticated policy identity. MCP callers cannot override this.
+  agent_id: claude
+  allowed_tools:
+    - shell.run
+    - shell.stream
+    - fs.read
+    - fs.write
+    - fs.list
+    - fs.grep
+    - fs.glob
+    - process.list
+    - process.kill
+    - handshake
+
 retry:
   default_max_attempts: 1
 

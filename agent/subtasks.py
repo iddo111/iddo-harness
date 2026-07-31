@@ -28,6 +28,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+try:
+    from agent_identity import copy_authenticated_identity
+except ImportError:  # pragma: no cover - packaged imports
+    from agent.agent_identity import copy_authenticated_identity
+
 log = logging.getLogger("harness.subtasks")
 
 DEFAULT_MAX_DEPTH = 4
@@ -59,6 +64,9 @@ class SubTask:
     envelope: Any = None
     parent_id: str | None = None
     depth: int = 0
+    authenticated_agent_id: str = ""
+    transport: str = "internal"
+    client_id: str = ""
 
 
 @dataclass
@@ -162,7 +170,7 @@ def build_subtask(
     if not isinstance(payload, dict):
         raise SubtaskError("task payload must be an object")
 
-    return SubTask(
+    child = SubTask(
         id=task_id,
         kind=kind,
         payload=dict(payload),
@@ -171,6 +179,7 @@ def build_subtask(
         parent_id=getattr(parent, "id", None),
         depth=depth,
     )
+    return copy_authenticated_identity(parent, child) if parent is not None else child
 
 
 class SubtaskManager:

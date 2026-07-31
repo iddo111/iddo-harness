@@ -18,6 +18,7 @@ from config import (
     MetricsConfig,
     RetryConfig,
     RuntimeConfig,
+    McpConfig,
     WsConfig,
     ensure_ws_token,
     load_config,
@@ -47,6 +48,16 @@ def test_ws_is_off_by_default():
     assert WsConfig().enabled is False
     assert WsConfig().host == "127.0.0.1"
     assert WsConfig().port == 8477
+
+
+def test_mcp_is_off_and_local_by_default():
+    cfg = McpConfig()
+    assert cfg.enabled is False
+    assert cfg.transport == "stdio"
+    assert cfg.sse_bind == "127.0.0.1"
+    assert cfg.sse_port == 8478
+    assert cfg.bearer_token_env == "HARNESS_MCP_TOKEN"
+    assert cfg.agent_id == "claude"
 
 
 def test_retry_and_metrics_defaults():
@@ -82,6 +93,9 @@ def test_repo_config_yaml_loads_and_matches_the_brief():
     assert cfg.ws.enabled is False
     assert cfg.ws.host == "127.0.0.1"
     assert cfg.ws.port == 8477
+    assert cfg.mcp.enabled is False
+    assert cfg.mcp.transport == "stdio"
+    assert cfg.mcp.sse_bind == "127.0.0.1"
     assert cfg.retry.default_max_attempts == 1
     assert cfg.metrics.enabled is True
 
@@ -148,7 +162,7 @@ def test_non_mapping_top_level_is_rejected(tmp_path):
         load_runtime_config(write_config(tmp_path, "- just\n- a list\n"), env={})
 
 
-@pytest.mark.parametrize("section", ["ws", "retry", "metrics"])
+@pytest.mark.parametrize("section", ["ws", "mcp", "retry", "metrics"])
 def test_non_mapping_section_is_rejected(tmp_path, section):
     with pytest.raises(ConfigError):
         load_runtime_config(write_config(tmp_path, f"{section}: 12\n"), env={})
@@ -175,6 +189,36 @@ def test_backoff_must_be_a_list(tmp_path):
         load_runtime_config(
             write_config(tmp_path, "retry:\n  default_backoff_seconds: 5\n"), env={}
         )
+
+
+def test_mcp_transport_and_allowlist_are_validated(tmp_path):
+    with pytest.raises(ConfigError, match="mcp.transport"):
+        load_runtime_config(write_config(tmp_path, "mcp:\n  transport: public-http\n"), env={})
+    with pytest.raises(ConfigError, match="unknown tools"):
+        load_runtime_config(write_config(tmp_path, "mcp:\n  allowed_tools: [workflow]\n"), env={})
+
+
+def test_mcp_allowlist_can_be_reduced(tmp_path):
+    cfg = load_runtime_config(
+        write_config(tmp_path, "mcp:\n  enabled: true\n  transport: sse\n  allowed_tools: [fs.read, handshake]\n"),
+        env={},
+    )
+    assert cfg.mcp.enabled is True
+    assert cfg.mcp.transport == "sse"
+    assert cfg.mcp.allowed_tools == ["fs.read", "handshake"]
+
+
+def test_mcp_authenticated_agent_env_override(tmp_path):
+    cfg = load_runtime_config(
+        write_config(tmp_path, "mcp:\n  agent_id: claude\n"),
+        env={"HARNESS_MCP_AGENT_ID": "perplexity"},
+    )
+    assert cfg.mcp.agent_id == "perplexity"
+
+
+def test_invalid_mcp_authenticated_agent_is_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="agent id"):
+        load_runtime_config(write_config(tmp_path, "mcp:\n  agent_id: '../admin'\n"), env={})
 
 
 def test_error_message_names_the_offending_key(tmp_path):

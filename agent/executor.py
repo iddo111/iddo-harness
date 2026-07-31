@@ -2,7 +2,9 @@
 Executor — actually runs the task subject to policy.
 """
 import logging
+import os
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -115,21 +117,26 @@ class Executor:
 
     # -----------------------------------------------------------------------
     def run(self, task) -> Result:
-        kind = task.kind
-        # v3 / v2 routers — everything below this line is the untouched v1 path.
-        if self._is_v3_kind(kind):
-            return self.v3.run(task)
-        if self._is_v2_kind(kind):
-            return self.v2.run(task)
-        if kind == "shell":
-            return self._run_shell(task)
-        if kind == "read_file":
-            return self._read_file(task)
-        if kind == "write_file":
-            return self._write_file(task)
-        if kind == "list_dir":
-            return self._list_dir(task)
-        return Result(task_id=task.id, ok=False, decision="unknown_kind", error=f"unknown kind: {kind}")
+        with self.policy.bind_task(task):
+            kind = task.kind
+            kind_decision, kind_reason = self.policy.authorize_kind(kind)
+            if kind_decision is Decision.BLOCK:
+                self.policy.audit(task.id, f"kind {kind}", kind_decision, kind_reason)
+                return Result(task_id=task.id, ok=False, decision="block", error=kind_reason)
+            # v3 / v2 routers — everything below this line is the untouched v1 path.
+            if self._is_v3_kind(kind):
+                return self.v3.run(task)
+            if self._is_v2_kind(kind):
+                return self.v2.run(task)
+            if kind == "shell":
+                return self._run_shell(task)
+            if kind == "read_file":
+                return self._read_file(task)
+            if kind == "write_file":
+                return self._write_file(task)
+            if kind == "list_dir":
+                return self._list_dir(task)
+            return Result(task_id=task.id, ok=False, decision="unknown_kind", error=f"unknown kind: {kind}")
 
     # -----------------------------------------------------------------------
     def resume_after_confirm(self, task, approved: bool) -> Result:
@@ -139,29 +146,34 @@ class Executor:
         policy CONFIRM gate, since a human already approved it). If denied,
         return a `denied` Result without running anything.
         """
-        if not approved:
-            log.info(f"task={task.id} confirmation denied — dropping")
-            return Result(task_id=task.id, ok=False, decision="denied", error="confirmation denied by user")
+        with self.policy.bind_task(task):
+            if not approved:
+                log.info(f"task={task.id} confirmation denied — dropping")
+                return Result(task_id=task.id, ok=False, decision="denied", error="confirmation denied by user")
 
-        log.info(f"task={task.id} confirmation approved — resuming execution")
-        kind = task.kind
-        if self._is_v3_kind(kind):
-            return self.v3.resume_after_confirm(task, approved)
-        if self._is_v2_kind(kind):
-            return self.v2.resume_after_confirm(task, approved)
-        try:
-            if kind == "shell":
-                return self._exec_shell(task)
-            if kind == "write_file":
-                return self._exec_write_file(task)
-            if kind == "read_file":
-                return self._read_file(task)
-            if kind == "list_dir":
-                return self._list_dir(task)
-            return Result(task_id=task.id, ok=False, decision="unknown_kind", error=f"unknown kind: {kind}")
-        except Exception as e:
-            log.exception(f"task={task.id} failed during resume_after_confirm")
-            return Result(task_id=task.id, ok=False, decision="approved", error=str(e))
+            log.info(f"task={task.id} confirmation approved — resuming execution")
+            kind = task.kind
+            kind_decision, kind_reason = self.policy.authorize_kind(kind)
+            if kind_decision is Decision.BLOCK:
+                self.policy.audit(task.id, f"kind {kind}", kind_decision, kind_reason)
+                return Result(task_id=task.id, ok=False, decision="block", error=kind_reason)
+            if self._is_v3_kind(kind):
+                return self.v3.resume_after_confirm(task, approved)
+            if self._is_v2_kind(kind):
+                return self.v2.resume_after_confirm(task, approved)
+            try:
+                if kind == "shell":
+                    return self._exec_shell(task)
+                if kind == "write_file":
+                    return self._exec_write_file(task)
+                if kind == "read_file":
+                    return self._read_file(task)
+                if kind == "list_dir":
+                    return self._list_dir(task)
+                return Result(task_id=task.id, ok=False, decision="unknown_kind", error=f"unknown kind: {kind}")
+            except Exception as e:
+                log.exception(f"task={task.id} failed during resume_after_confirm")
+                return Result(task_id=task.id, ok=False, decision="approved", error=str(e))
 
     # -----------------------------------------------------------------------
     def _run_shell(self, task) -> Result:
@@ -257,13 +269,31 @@ class Executor:
     def _exec_write_file(self, task) -> Result:
         """Actually write the file (used by auto path and by resume_after_confirm)."""
         path = Path(task.payload.get("path", "")).expanduser()
+        tmp_name = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(task.payload.get("content", ""), encoding="utf-8")
+            # Write beside the destination and atomically replace it. A crash
+            # can leave a disposable temp file, never a half-written target.
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent,
+                prefix=f".{path.name}.", suffix=".tmp", delete=False,
+            ) as fh:
+                tmp_name = fh.name
+                fh.write(task.payload.get("content", ""))
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_name, path)
+            tmp_name = None
             return Result(task_id=task.id, ok=True, decision="auto",
                           metadata={"path": str(path), "bytes": path.stat().st_size})
         except Exception as e:
             return Result(task_id=task.id, ok=False, decision="auto", error=str(e))
+        finally:
+            if tmp_name:
+                try:
+                    Path(tmp_name).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     # -----------------------------------------------------------------------
     def _list_dir(self, task) -> Result:
