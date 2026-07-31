@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import secrets_vault
+from file_security import private_file_permissions_ok
 from secrets_vault import (
     MissingSecretError,
     SecretVault,
@@ -101,7 +102,7 @@ def test_store_file_is_encrypted_on_disk(vault):
 
 def test_store_file_is_not_world_readable(vault):
     vault.set("k", "v")
-    assert vault.store_path.stat().st_mode & 0o077 == 0
+    assert private_file_permissions_ok(vault.store_path)
 
 
 def test_names_lists_without_values(vault):

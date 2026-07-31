@@ -21,6 +21,11 @@ from typing import Any, Callable
 
 import yaml
 
+try:
+    from file_security import restrict_private_file
+except ImportError:  # pragma: no cover - packaged imports
+    from agent.file_security import restrict_private_file
+
 
 DEFAULT_CONFIG_PATHS = [
     Path.home() / ".iddo-harness" / "policy.yaml",
@@ -312,9 +317,6 @@ def ensure_ws_token(cfg: RuntimeConfig) -> str:
     token = secrets.token_urlsafe(32)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(token + "\n", encoding="utf-8")
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass  # Windows / exotic filesystems: best effort.
+    restrict_private_file(path)
     cfg.ws.token = token
     return token

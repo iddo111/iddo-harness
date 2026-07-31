@@ -49,10 +49,14 @@ import json
 import logging
 import os
 import re
-import stat
 import threading
 from pathlib import Path
 from typing import Any, Iterable
+
+try:
+    from file_security import restrict_private_file
+except ImportError:  # pragma: no cover - packaged imports
+    from agent.file_security import restrict_private_file
 
 log = logging.getLogger("harness.secrets")
 
@@ -249,11 +253,9 @@ class SecretVault:
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.store_path.with_suffix(self.store_path.suffix + ".tmp")
         tmp.write_bytes(blob)
-        try:
-            os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
-        except OSError as e:  # pragma: no cover - Windows / exotic FS
-            log.warning(f"could not restrict permissions on {tmp}: {e}")
+        restrict_private_file(tmp)
         os.replace(tmp, self.store_path)
+        restrict_private_file(self.store_path)
 
     # -----------------------------------------------------------------------
     # Public API

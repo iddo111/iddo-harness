@@ -534,7 +534,7 @@ def test_http_local_rejects_unknown_method(ex: ExecutorV2):
 def test_read_file_chunked_paginates_exactly(ex: ExecutorV2, tmp_path: Path):
     target = tmp_path / "big.log"
     content = "".join(f"{i:04d}\n" for i in range(500))  # 2500 bytes
-    target.write_text(content, encoding="utf-8")
+    target.write_bytes(content.encode("utf-8"))
     total = len(content.encode("utf-8"))
 
     collected = ""

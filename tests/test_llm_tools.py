@@ -14,6 +14,7 @@ Also covers the tool schema catalog shape and the harness_result envelope
 helper used for per-iteration audit logging.
 """
 import json
+import os
 
 import pytest
 
@@ -126,7 +127,7 @@ def test_envelope_to_executor_task_strips_bookkeeping_fields():
 
 class _FakeCfg:
     """Minimal stand-in for agent.config.Config, just enough for PolicyEngine."""
-    auto_allow = {"commands": ["ls*", "pwd", "cat*"]}
+    auto_allow = {"commands": ["ls*", "dir*", "pwd", "cat*"]}
     require_confirm = {"commands": ["pip install*"]}
     block = {"commands": ["rm -rf /"]}
 
@@ -142,7 +143,8 @@ def executor(tmp_path):
 
 
 def test_round_trip_shell_auto_allowed(executor):
-    tc = _make_tool_call("shell", {"command": "ls -la"}, call_id="call_auto")
+    command = "dir" if os.name == "nt" else "ls -la"
+    tc = _make_tool_call("shell", {"command": command}, call_id="call_auto")
     env = tool_call_to_task(tc)
     task = envelope_to_executor_task(env)
 

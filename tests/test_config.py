@@ -7,10 +7,11 @@ fail loudly at startup rather than surfacing as a mystery later.
 """
 from __future__ import annotations
 
-import stat
 from pathlib import Path
 
 import pytest
+
+from file_security import private_file_permissions_ok
 
 from config import (
     ConfigError,
@@ -231,8 +232,7 @@ def test_ensure_ws_token_is_stable_across_calls(tmp_path):
 def test_minted_token_file_is_owner_only(tmp_path):
     cfg = RuntimeConfig(ws=WsConfig(token_path=tmp_path / "ws-token"))
     ensure_ws_token(cfg)
-    mode = stat.S_IMODE(cfg.ws.token_path.stat().st_mode)
-    assert mode == 0o600
+    assert private_file_permissions_ok(cfg.ws.token_path)
 
 
 def test_explicit_token_is_never_written_to_disk(tmp_path):
