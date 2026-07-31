@@ -17,7 +17,16 @@ dependencies = [
 test = ["pytest>=7", "respx>=0.20", "pytest-asyncio>=0.23"]
 # v2 Agent Fabric: watch_* prefers watchdog, process_* prefers psutil. Both
 # degrade to built-in fallbacks (mtime polling / ps+tasklist) when absent.
-agentfabric = ["watchdog>=4.0.0", "psutil>=5.9.0"]
+# websockets powers the optional ws transport; absent, agent/ws_bridge.py
+# refuses to start rather than degrading into an unauthenticated listener.
+agentfabric = ["watchdog>=4.0.0", "psutil>=5.9.0", "websockets>=12.0"]
+# v3 Track B: result signing and the secrets vault. Strongly recommended — the
+# harness runs without it, but every result it publishes is then unforgeable by
+# nobody, and {{secret:...}} references cannot be resolved.
+security = ["cryptography>=42.0.0"]
+# v3 Agent-Native: schedule_task prefers croniter for cron expressions and
+# degrades to a built-in 5-field parser when absent.
+agentnative = ["croniter>=2.0.0"]
 
 [project.scripts]
 iddo-harness = "agent.cli:cli"

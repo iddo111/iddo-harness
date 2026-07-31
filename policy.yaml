@@ -59,6 +59,15 @@ auto_allow:
     - "http_local POST http://127.0.0.1*"
     - "http_local POST http://localhost*"
 
+    # --- v3 Agent-Native (docs/v3_track_c.md) --------------------------------
+    # הזיכרון הוא ה-scratch store של ה-agent עצמו ב-~/.iddo-harness/memory.db,
+    # לא הקבצים שלך. הוא לא מחזיק כלום שלא נתת ל-agent מלכתחילה, והבעלים יכול
+    # לקרוא אותו ישירות ב-sqlite3 CLI בלי להריץ את ה-agent — לכן כתיבה ומחיקה
+    # אוטומטיות. הקריאות (memory_get / memory_list) לא עוברות בשער בכלל,
+    # ראה `_UNGATED_KINDS` ב-agent/executor_v3.py.
+    - "memory_set *"
+    - "memory_delete *"
+
   paths:
     read:
       - "D:\\CLAUDE\\**"
@@ -97,6 +106,13 @@ require_confirm:
     - "http_local * http://172.1[6-9].*"
     - "http_local * http://172.2[0-9].*"
     - "http_local * http://172.3[01].*"
+
+    # --- v3 Agent-Native (docs/v3_track_c.md §6) -----------------------------
+    # תזמון זה הרצה עתידית בלי שאף אחד מסתכל — בדיוק הדבר שהבעלים צריך לאשר
+    # פעם אחת מראש. הביטול גם דורש אישור: להשתיק בשקט משהו שביקשת זה לא פחות
+    # מפתיע מלהוסיף אותו. `schedule_list` היא קריאה ולא עוברת בשער.
+    - "schedule *"
+    - "schedule_cancel *"
 
   paths:
     write:
@@ -157,6 +173,63 @@ paths:
   audit_log: "~/.iddo-harness/audit.log"
   task_queue: "~/.iddo-harness/queue/"
   results:   "~/.iddo-harness/results/"
+
+# ---------------------------------------------------------------------------
+# v3 Track B — Security (docs/security_v3.md)
+# ---------------------------------------------------------------------------
+security:
+  # חתימת תוצאות (Ed25519). המפתחות נוצרים ע"י `python -m installer.gen_keys`.
+  # אם אין מפתח — התוצאות יוצאות בלי חתימה, עם warning אחד בלוג.
+  signing:
+    enabled: true
+    # private_key_path: ~/.iddo-harness/agent.key
+    # public_key_path:  ~/.iddo-harness/agent.pub
+
+  # כספת סודות מוצפנת. בתוך task packet: "{{secret:openai_key}}".
+  # הערך מוחלף רגע לפני ההרצה ואף פעם לא נכתב ללוג / ל-results.
+  secrets:
+    # store_path: ~/.iddo-harness/secrets.enc
+    # key_path:   ~/.iddo-harness/agent.key
+
+  # יומן ביקורת בשרשרת HMAC — כל שורה חותמת על קודמתה.
+  audit:
+    # path:     ~/.iddo-harness/audit.jsonl
+    # key_path: ~/.iddo-harness/audit.key
+    rotate_daily: true
+
+# ---------------------------------------------------------------------------
+# Sandbox — הגבלת מה שפקודה יכולה לגעת בו (לא *אם* היא תרוץ; זה תפקיד ה-policy)
+#
+#   none    — כמו היום, בלי עטיפה. ברירת המחדל, כדי לא לשנות התנהגות קיימת.
+#   light   — /tmp פרטי.
+#   strict  — בלי רשת, וקריאה-בלבד מחוץ ל-cwd של המשימה.
+#
+# Linux דורש firejail. Windows דורש pywin32. בלעדיהם — warning והרצה רגילה.
+# ---------------------------------------------------------------------------
+sandbox:
+  enabled: true
+  default: none
+  per_kind:
+    # shell_stream: light
+    # shell_session_open: light
+
+# ---------------------------------------------------------------------------
+# שרת health/audit מקומי (agent/health_server.py). localhost בלבד.
+# ---------------------------------------------------------------------------
+health:
+  enabled: false
+  host: 127.0.0.1
+  port: 8478
+
+# ---------------------------------------------------------------------------
+# זרימת אישורים (agent/approval.py)
+#   local        — קבצים ב-~/.iddo-harness/pending (v1, ברירת מחדל)
+#   notification — + התראה לדסקטופ (notify-send / toast / osascript)
+#   remote       — + שליחה דרך WS bridge של Track A, אם הוא פועל
+# ---------------------------------------------------------------------------
+approval:
+  mode: local
+  timeout_seconds: 300
 
 # ---------------------------------------------------------------------------
 # תעלת התקשורת

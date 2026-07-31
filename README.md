@@ -4,6 +4,87 @@
 
 ---
 
+## v3 Highlights
+
+v3 מגיע בשלושה מסלולים שנבנו במקביל ומוזגו יחד: **Track A** (זמן אמת וביצועים),
+**Track B** (אבטחה ואמון) ו-**Track C** (יכולות סוכן). כל אחד עומד בפני עצמו,
+ואף אחד מהם לא שובר packet של v1 או v2.
+
+---
+
+## v3 Track A — Realtime & Performance
+
+v2 נתן יכולות; Track A מטפל ב-latency ובמה שסביבו. המפרט המלא:
+[`docs/v3_track_a.md`](docs/v3_track_a.md).
+
+| יכולת | מה זה נותן |
+|---|---|
+| **WebSocket bridge** | `ws://127.0.0.1:8477/tasks` — צ'אנקים חוזרים בזמן אמת במקום להמתין ל-poll ול-push. מאומת ב-Bearer token, **כבוי כברירת מחדל**, ורץ *לצד* git bridge ולא במקומו |
+| **מקביליות** | `max_concurrent_tasks: 3` — build של עשר דקות לא חוסם יותר כל `read_file` מאחוריו. git נשאר writer יחיד דרך lock משותף |
+| **תור עדיפויות** | `priority`, `not_before`, `deadline`, `depends_on` — ה-producer קובע *מתי* ו*באיזה סדר* |
+| **ביטול** | `kind: cancel` — SIGTERM→SIGKILL, עם chunk סופי `cancelled: true` כדי שאף אחד לא ימתין לשווא |
+| **Retry** | `retry: {max_attempts, backoff_seconds}`, כל ניסיון ב-`results/<id>-attempt-<n>.json`. `block`/`confirm_required` לא חוזרים |
+| **Metrics** | `GET /metrics` (JSON או Prometheus) + `/health` — latency p50/p95/p99, מונים לפי kind ו-status, queue depth |
+| **`config.yaml`** | קובץ קונפיג ריצה אחד עם ולידציה ו-ENV override, במקום env vars מפוזרים |
+
+**Backward compat:** harness בלי `config.yaml`, בלי מטא-דאטת תזמון ובלי
+`ws.enabled` מתנהג בדיוק כמו v2. ב-`amp.py` לא נגענו.
+
+---
+
+## v3 Track B — Security & Trust
+
+v2 נתן יכולות; Track B עונה על "למה שמישהו יסמוך על זה?". המפרט המלא:
+[`docs/security_v3.md`](docs/security_v3.md).
+
+| יכולת | מה זה נותן |
+|---|---|
+| **חתימת תוצאות** | כל תוצאה ו-chunk נחתמים Ed25519 מעל JSON קנוני. push access לריפו כבר לא מספיק כדי לזייף `results/<id>.json` — `python -m agent.verify` תופס את זה |
+| **יומן בשרשרת** | `audit.jsonl` שבו כל שורה חותמת על קודמתה ב-HMAC. מחיקה או עריכה של שורה שוברת את כל השרשרת מאותה נקודה, ו-`iddo-harness audit verify` מצביע על השורה הראשונה שנשברה |
+| **כספת סודות** | `{{secret:openai_key}}` בתוך ה-packet; הערך מוחלף רגע לפני ההרצה ונמחק מהפלט. מפתח API כבר לא צריך לעבור דרך git ולשבת ב-`results/` לנצח |
+| **Sandbox** | `none` / `light` / `strict` לפי `kind`. ה-policy מחליט *אם* פקודה תרוץ; זה מגביל *במה היא נוגעת* אחרי שכן |
+| **זרימת אישורים** | `local` / `notification` / `remote` — מצטברים, לא חלופיים. timeout של 5 דקות במקום 30, כי prompt שמתמהמה זה prompt שמאשרים בלי לקרוא |
+| **Health endpoint** | `/health`, `/metrics`, `/audit/tail`, `/policy` — localhost בלבד, פעמיים (bind + בדיקת peer). **כבוי כברירת מחדל** |
+| **Policy linter** | `iddo-harness policy lint` — תופס `block:` ריק, דפוס שלא מתאים לכלום, וכפילויות בין `auto_allow` ל-`block`. exit codes ל-CI |
+
+**Backward compat:** `policy.yaml` בלי בלוק `security:` מתנהג בדיוק כמו v2. בלי
+מפתחות — תוצאות יוצאות בלי חתימה, עם warning אחד. ב-`amp.py` לא נגענו.
+
+**תלות חדשה (אופציונלית):** `cryptography>=42.0.0` (`pip install 'iddo-harness[security]'`).
+
+---
+
+## v3 Track C — Agent-Native Capabilities
+
+v3 מוסיף 7 יכולות (14 `kind`ים) שהופכות את ה-harness מזוג ידיים לסוכן: הוא מסדר
+תלויות, זוכר, ופועל גם כשאף אחד לא מבקש. המפרט המלא:
+[`docs/v3_track_c.md`](docs/v3_track_c.md).
+
+| יכולת | `kind` | מה זה נותן |
+|---|---|---|
+| Sub-tasks | `spawn_task` / `await_tasks` | fan-out מקבילי + join, במקום עשר נסיעות רשת |
+| Workflow DAG | `workflow` | גרף תלויות שה-harness פותר לבד, עם `${nodes.x.stdout}` בין צמתים |
+| Memory | `memory_set` / `_get` / `_list` / `_delete` | SQLite מקומי — משהו ששורד את ה-task, עם TTL, tags ו-namespaces |
+| Scheduler | `schedule_task` / `_list` / `_cancel` | cron / interval / one-shot; "כל בוקר ב-6" בלי producer שלא ישן |
+| LLM tool loop | `llm_task` | "תבין את זה על המכונה" כ-kind, דרך אותו policy ואותו audit trail |
+| Handshake | `handshake` | נסיעה אחת שאומרת מה ה-harness יודע לעשות, עם negotiation |
+| Templates | `run_template` / `template_list` | 5 עבודות מוכנות שנפרשות ל-workflow רגיל |
+
+**עקרונות:** אין מסלול הרצה שני — כל sub-task, צומת workflow, firing מתוזמן,
+tool call של מודל ותבנית שנפרשה חוזרים דרך `Executor.run()` ופוגשים את
+`PolicyEngine` בזכות עצמם. Policy נאכף **על הילד, לא על המעטפה**: לבקש אישור על
+`workflow` זה לבקש מהבעלים לאשר מכולה שהוא לא רואה מה בתוכה. ו-`llm_task` **עוצר**
+על `confirm_required` — מודל שיכול לעבור שער אישור מבטל את השער.
+
+**Backward compat:** כל packet של v1 ו-v2 ממשיך לרוץ בדיוק כמו קודם.
+ב-`agent/amp.py` וב-`agent/executor_v2.py` לא נגענו, וה-hook של v3 הוא שלוש
+שורות ניתוב מעל מסלול v1. packet של v1 בכלל לא בונה את `ExecutorV3`.
+
+**תלות חדשה (אופציונלית):** `croniter>=2.0.0`. בלעדיה יש parser פנימי ל-cron
+בחמישה שדות, ו-`validate_cron` עונה אותו דבר בשני המקרים.
+
+---
+
 ## v2 Highlights — Agent Fabric
 
 v2 מוסיף 11 יכולות חדשות (14 `kind`ים) מעל v1, בלי לשבור שום דבר קיים.
@@ -41,8 +122,11 @@ v2 מוסיף 11 יכולות חדשות (14 `kind`ים) מעל v1, בלי לש�
 | פרוטוקול | MCP | **AMP v1.0** — ניתוב רב-brick עם `reply.to_address` |
 | מספר לקוחות במקביל | server אחד ללקוח | הרבה producers לתוך `tasks/` אחד |
 
-איפה Desktop Commander עדיין מוביל: latency. stdio מקומי מגיב במילישניות, git poll לא.
-זה המחיר של לעבוד מכל מקום.
+איפה Desktop Commander הוביל: latency. stdio מקומי מגיב במילישניות, git poll לא —
+זה היה המחיר של לעבוד מכל מקום. **v3 Track A סוגר את הפער** עם תחבורת
+WebSocket אופציונלית לצד git bridge: כשהצרכן על אותה מכונה (או בקצה השני של
+tunnel קיים) הוא מקבל את הצ'אנקים בזמן אמת, ובלי לאבד את היכולת לעבוד מכל מקום
+כשהוא לא.
 
 **Backward compat:** כל task packet של v1 (`shell`, `read_file`, `write_file`,
 `list_dir`) ממשיך לרוץ בדיוק כמו קודם. `agent/executor.py` נשמר, ב-`agent/amp.py`
@@ -103,20 +187,47 @@ iddo-harness/
 ├── agent/                    # ה-agent עצמו
 │   ├── main.py              # הכניסה הראשית
 │   ├── poller.py            # מושך משימות מ-GitHub
-│   ├── executor.py          # מבצע פקודות (v1) + router ל-v2
+│   ├── executor.py          # מבצע פקודות (v1) + router ל-v2 ול-v3
 │   ├── executor_v2.py       # 14 ה-kinds של Agent Fabric (v2)
+│   ├── executor_v3.py       # 14 ה-kinds של Agent-Native (v3)
+│   ├── subtasks.py          # spawn_task / await_tasks
+│   ├── workflow.py          # גרף התלויות (kind: workflow)
+│   ├── memory.py            # זיכרון מתמיד ב-SQLite
+│   ├── scheduler.py         # cron / interval / one-shot
+│   ├── llm_task.py          # לופ הכלים של המודל + mock providers
+│   ├── handshake.py         # גילוי יכולות ו-negotiation
+│   ├── templates.py         # 5 התבניות המוכנות
 │   ├── reporter.py          # מדווח תוצאות
 │   ├── reporter_v2.py       # דיווח בצ'אנקים (streaming)
 │   ├── policy.py            # אכיפת policy
-│   └── config.py            # הגדרות
+│   ├── config.py            # policy config (v1) + RuntimeConfig (v3)
+│   ├── runner.py            # thread pool, retries, ביטול (v3)
+│   ├── taskqueue.py         # עדיפויות, תלויות, חלונות זמן (v3)
+│   ├── metrics.py           # אוסף מדדים + /metrics ו-/health (v3)
+│   ├── ws_bridge.py         # תחבורת WebSocket מאומתת (v3)
+│   ├── locks.py             # GIT_PUSH_LOCK המשותף (v3)
+│   ├── signing.py           # חתימת תוצאות Ed25519 (v3 Track B)
+│   ├── verify.py            # מאמת חתימות מה-CLI (v3)
+│   ├── audit.py             # יומן ביקורת בשרשרת HMAC (v3)
+│   ├── secrets_vault.py     # כספת מוצפנת + {{secret:name}} (v3)
+│   ├── sandbox.py           # none / light / strict (v3)
+│   ├── approval.py          # local / notification / remote (v3)
+│   └── health_server.py     # /health, /audit/tail, /policy (v3)
 ├── installer/               # התקנה מהירה
 │   ├── install_windows.ps1  # Windows one-liner
 │   ├── install_linux.sh     # Linux/DGX
-│   └── install_mac.sh       # macOS
+│   ├── install_mac.sh       # macOS
+│   ├── gen_keys.py          # יצירת זוג מפתחות למכונה (v3)
+│   └── policy_lint.py       # לינטר ל-policy.yaml (v3)
 ├── docs/
 │   ├── quickstart.md
 │   ├── security.md
+│   ├── security_v3.md
+│   ├── v2_spec.md
+│   ├── v3_track_a.md
+│   ├── v3_track_c.md
 │   └── troubleshooting.md
+├── config.yaml              # קונפיג ריצה (v3)
 └── policy.yaml              # policy קונפיג
 ```
 

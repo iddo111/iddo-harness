@@ -39,6 +39,16 @@ from typing import Any
 
 import amp
 
+try:
+    from locks import GIT_PUSH_LOCK
+except ImportError:  # installed as a package
+    from agent.locks import GIT_PUSH_LOCK
+
+try:
+    from signing import Signer
+except ImportError:  # pragma: no cover - packaged imports
+    from agent.signing import Signer
+
 log = logging.getLogger("harness.reporter_v2")
 
 # Same identity constants as v1's reporter — the harness is one AMP brick
@@ -65,6 +75,7 @@ class ReporterV2:
         batch_interval_ms: int = DEFAULT_BATCH_INTERVAL_MS,
         git_push: bool = True,
         local_dir: Path | None = None,
+        signer: Any | None = None,
     ) -> None:
         self.cfg = cfg
         self.repo = cfg.transport["repo"]
@@ -76,7 +87,16 @@ class ReporterV2:
             Path(tempfile.gettempdir()) / f"iddo-harness-bridge-{self.repo.replace('/', '_')}"
         )
         self._instance = getattr(cfg, "owner", None) or "agent-default"
+        # Each chunk is signed independently: a consumer acts on chunk 7 long
+        # before the final chunk exists, so a per-task signature would arrive
+        # too late to be worth anything (docs/security_v3.md §1).
+        self.signer = signer if signer is not None else Signer.from_config(cfg)
         self._lock = threading.Lock()
+        # Separate from _lock: git is a single-writer resource, so several
+        # worker threads finishing at once must not interleave add/commit/push
+        # in the same working copy. Shared process-wide because the v1 reporter
+        # and the poller write into the same clone.
+        self._git_lock = GIT_PUSH_LOCK
         self._pending: list[Path] = []
         self._last_flush = time.time()
 
@@ -91,7 +111,7 @@ class ReporterV2:
         a caller forgets them.
         """
         body = {**chunk_body, "task_id": task.id, "seq": seq, "is_final": is_final}
-        payload = self._wrap(task, body)
+        payload = self.signer.sign(self._wrap(task, body), context=f"chunk:{task.id}#{seq}")
         path = self._chunk_path(task.id, seq)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -120,6 +140,23 @@ class ReporterV2:
             task, {"ok": False, "decision": "error", "error": err_msg}, seq=0, is_final=True
         )
 
+    def send_attempt(self, task: Any, result: Any, attempt: int) -> Path:
+        """Record one retry attempt as ``results/<id>-attempt-<n>.json``.
+
+        Deliberately *not* a chunk: attempt files sit outside the ``seq`` /
+        ``is_final`` stream so a consumer following the chunk protocol never
+        sees two finals for one task. They are diagnostics — the authoritative
+        outcome is still the final chunk of the last attempt.
+        """
+        body = asdict(result) if is_dataclass(result) and not isinstance(result, type) else dict(result)
+        body = {**body, "task_id": task.id, "attempt": attempt}
+        path = self._local / self.result_dir / f"{task.id}-attempt-{attempt}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self._wrap(task, body), indent=2, ensure_ascii=False), encoding="utf-8")
+        with self._lock:
+            self._pending.append(path)
+        return path
+
     def flush(self, message: str = "results: chunk batch") -> None:
         """Commit and push every chunk written since the last flush."""
         with self._lock:
@@ -128,9 +165,10 @@ class ReporterV2:
         if not pending or not self.git_push:
             return
         args = ["git", "-C", str(self._local)]
-        subprocess.run(args + ["add", *[str(p) for p in pending]], check=False, capture_output=True)
-        subprocess.run(args + ["commit", "-m", message], check=False, capture_output=True)
-        subprocess.run(args + ["push", "--quiet"], check=False, capture_output=True)
+        with self._git_lock:
+            subprocess.run(args + ["add", *[str(p) for p in pending]], check=False, capture_output=True)
+            subprocess.run(args + ["commit", "-m", message], check=False, capture_output=True)
+            subprocess.run(args + ["push", "--quiet"], check=False, capture_output=True)
         log.info(f"pushed {len(pending)} chunk file(s): {message}")
 
     # -----------------------------------------------------------------------

@@ -21,6 +21,16 @@ from pathlib import Path
 
 import amp
 
+try:
+    from locks import GIT_PUSH_LOCK
+except ImportError:  # installed as a package
+    from agent.locks import GIT_PUSH_LOCK
+
+try:
+    from signing import Signer
+except ImportError:  # pragma: no cover - packaged imports
+    from agent.signing import Signer
+
 log = logging.getLogger("harness.reporter")
 
 # Iddo Harness's own AMP identity when acting as the outbound source/actor.
@@ -31,12 +41,16 @@ HARNESS_IDENTITY_CANONICAL = "brick:iddo-harness"
 
 
 class Reporter:
-    def __init__(self, cfg):
+    def __init__(self, cfg, signer=None):
         self.cfg = cfg
         self.repo = cfg.transport["repo"]
         self.result_dir = cfg.transport.get("result_dir", "results/")
         self._local = Path(tempfile.gettempdir()) / f"iddo-harness-bridge-{self.repo.replace('/', '_')}"
         self._instance = getattr(cfg, "owner", None) or "agent-default"
+        # Every published result is signed (docs/security_v3.md §1). An install
+        # that never ran `installer.gen_keys` has no key, and Signer then passes
+        # documents through unchanged — unsigned beats not reporting at all.
+        self.signer = signer if signer is not None else Signer.from_config(cfg)
 
     # -----------------------------------------------------------------------
     def send(self, task, result):
@@ -47,6 +61,17 @@ class Reporter:
         legacy = {"task_id": task.id, "ok": False, "error": err_msg, "decision": "error"}
         payload = self._build_result_payload(task, legacy)
         self._write(task, payload)
+
+    def send_attempt(self, task, result, attempt: int):
+        """Record one retry attempt as `results/<id>-attempt-<n>.json`.
+
+        The final attempt is *also* written to `results/<id>.json` by `send`,
+        so a consumer that knows nothing about retries still finds the outcome
+        where it has always been.
+        """
+        body = {**asdict(result), "attempt": attempt}
+        payload = self._build_result_payload(task, body)
+        self._write(task, payload, filename=f"{task.id}-attempt-{attempt}.json")
 
     # -----------------------------------------------------------------------
     def _build_result_payload(self, task, result_body: dict) -> dict:
@@ -85,14 +110,17 @@ class Reporter:
         return amp.serialize(result_envelope)
 
     # -----------------------------------------------------------------------
-    def _write(self, task, payload: dict):
+    def _write(self, task, payload: dict, filename: str | None = None):
+        payload = self.signer.sign(payload, context=f"result:{task.id}")
         out_dir = self._local / self.result_dir
         out_dir.mkdir(parents=True, exist_ok=True)
-        p = out_dir / f"{task.id}.json"
+        p = out_dir / (filename or f"{task.id}.json")
         p.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        subprocess.run(["git", "-C", str(self._local), "add", str(p)], check=False, capture_output=True)
-        subprocess.run(["git", "-C", str(self._local), "commit", "-m", f"result: {task.id}"], check=False, capture_output=True)
-        subprocess.run(["git", "-C", str(self._local), "push", "--quiet"], check=False, capture_output=True)
+        # One working copy, several worker threads: git must be single-writer.
+        with GIT_PUSH_LOCK:
+            subprocess.run(["git", "-C", str(self._local), "add", str(p)], check=False, capture_output=True)
+            subprocess.run(["git", "-C", str(self._local), "commit", "-m", f"result: {p.stem}"], check=False, capture_output=True)
+            subprocess.run(["git", "-C", str(self._local), "push", "--quiet"], check=False, capture_output=True)
         # AMP-shaped results nest ok/decision under payload.body; legacy
         # results carry them at the top level. Read from whichever is present
         # so the log line stays informative either way.
