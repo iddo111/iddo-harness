@@ -21,13 +21,22 @@ def default_config_path(env: dict[str, str] | None = None) -> Path:
 
 
 def server_entry(*, python: str | None = None, policy_path: str | None = None,
-                 runtime_path: str | None = None) -> dict[str, Any]:
+                 runtime_path: str | None = None,
+                 source_root: str | None = None) -> dict[str, Any]:
     args = ["-m", "agent.mcp_server", "--transport", "stdio"]
     if policy_path:
         args.extend(["--config", str(Path(policy_path).resolve())])
     if runtime_path:
         args.extend(["--runtime-config", str(Path(runtime_path).resolve())])
-    return {"command": python or sys.executable, "args": args}
+    root = Path(source_root).resolve() if source_root else Path(__file__).resolve().parents[1]
+    return {
+        "command": python or sys.executable,
+        "args": args,
+        # Claude Desktop does not guarantee that MCP servers start in the
+        # repository directory.  Make the requested ``python -m`` contract
+        # independent of the host process working directory.
+        "env": {"PYTHONPATH": str(root)},
+    }
 
 
 def merged_config(existing: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:

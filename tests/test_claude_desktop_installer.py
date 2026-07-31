@@ -15,9 +15,10 @@ def test_default_path_uses_claude_appdata_directory(tmp_path):
 
 
 def test_server_entry_uses_module_stdio_and_current_python():
-    entry = server_entry(python="python-test")
+    entry = server_entry(python="python-test", source_root="C:/harness-test")
     assert entry["command"] == "python-test"
     assert entry["args"] == ["-m", "agent.mcp_server", "--transport", "stdio"]
+    assert entry["env"]["PYTHONPATH"] == str(Path("C:/harness-test").resolve())
 
 
 def test_merge_preserves_other_servers_and_settings():
