@@ -23,12 +23,14 @@ def default_config_path(env: dict[str, str] | None = None) -> Path:
 def server_entry(*, python: str | None = None, policy_path: str | None = None,
                  runtime_path: str | None = None,
                  source_root: str | None = None) -> dict[str, Any]:
-    args = ["-m", "agent.mcp_server", "--transport", "stdio"]
-    if policy_path:
-        args.extend(["--config", str(Path(policy_path).resolve())])
-    if runtime_path:
-        args.extend(["--runtime-config", str(Path(runtime_path).resolve())])
     root = Path(source_root).resolve() if source_root else Path(__file__).resolve().parents[1]
+    policy = Path(policy_path).resolve() if policy_path else root / "policy.yaml"
+    runtime = Path(runtime_path).resolve() if runtime_path else root / "config.yaml"
+    args = [
+        "-m", "agent.mcp_server", "--transport", "stdio",
+        "--config", str(policy),
+        "--runtime-config", str(runtime),
+    ]
     return {
         "command": python or sys.executable,
         "args": args,
